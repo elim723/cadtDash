@@ -24,7 +24,9 @@ The last step may take awhile.
 
 ## Usage
 
-First, run the python script.
+First, put your file "mPowerExampleData.xlsx" to `/path/to/cadtDash/../`.
+
+Then, run the python script.
 ```bash
 
 python /path/to/cadtDash/extractFromMPower.py
