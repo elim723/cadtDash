@@ -1,6 +1,6 @@
 # cadtDash
 
-cadtDash is a Python library that visualize clinical data via a web interface.
+cadtDash is a Python library that visualizes clinical data via a web interface.
 
 ## Installation
 
@@ -8,28 +8,35 @@ This tool is deveoped using Python 3.9.4. A requirement.txt is provided to set u
 
 ```bash
 
-## 1. Create a new virtual environment
-python3 -m venv /path/to/new/virtual/environment
+## 1. Click the above green “Code” button, then click “Download Zip”.
+
+## 2. Extract that downloaded Zip file to some folder.  In that folder there will be a folder called cadtDash-main.  That will be our working folder.
+
+## 3. Start an Anaconda prompt.
+
+## 4. In that Anaconda prompt change directories to that cadtDash-main folder:
+cd  pathtoextractedFolder\cadtDash-main
+
+## 5. Create a new virtual environment
+python3 -m venv .
 
 ## 2. Source the environment
-cd /path/to/new/virtual/environment
-source bin/activate
-# if windows:
-#.\Scripts\activate
+.\Scripts\activatecd
+# source bin/activate # if Linux/bash
 
 ## 3. Install all required packages
-pip install -r /path/to/cadtDash/requirements.txt 
+pip install -r requirements.txt 
 ```
-The last step may take awhile.
+The last step may take awhile.  If the installation hangs, you may have to press the enter key.
 
 ## Usage
 
-First, put your file "mPowerExampleData.xlsx" to `/path/to/cadtDash/../`.
+First, put your file "mPowerExampleData.xlsx" in the pathtoextractedFolder\cadtDash-main folder.
 
 Then, run the python script.
 ```bash
 
-python /path/to/cadtDash/extractFromMPower.py
+python extractFromMPower.py
 ```
 
 A message will pop up.
