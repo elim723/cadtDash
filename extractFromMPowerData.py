@@ -41,35 +41,207 @@
 ###############################
 ## Import libraries
 ###############################
-from dash import Dash, dcc, html, Input, Output, State
+from dash import Dash, dcc, html, Input, Output
 import dash_bootstrap_components as dbc
 import plotly.express as px
 import plotly.graph_objs as go
 import plotly.io as pio
+
 import pandas, numpy
+from pandas.tseries.holiday import USFederalHolidayCalendar
+from copy import deepcopy
 
 ###############################
-## Dataframe
+## Keyword dictionaries
 ###############################
-mPowerDataFilename = '../mPowerExampleData.xlsx'
-boolColumns = ['Is Stat']
-categoryColumns = ['Modality', 'Patient Status', 'Preliminary Report By', 'Exam Description']
-freeTextColumns = ['Report Text']
-continuousColumns = ['Exam Started to Exam Completed (minutes)',
-                     'Exam Completed to Report Created (minutes)',
-                     'Exam Completed to Preliminary Report (minutes)',
-                     'Exam Completed to Report Finalized (minutes)',
-                     'Preliminary Report to Report Finalized (minutes)']
-dateColumns = ['Ordered Date', 'Scheduled Date', 'Patient Arrived Date',
-               'Exam Started Date', 'Exam Completed Date', 'Report Created Date',
-               'Preliminary Report Date', 'Report Finalized Date']
-columns = continuousColumns + dateColumns + boolColumns + categoryColumns
+BodyPartKeywords = {'chest':['chest'],
+                    'abdomen':['abd', 'abdomen'],
+                    'pelvis':['pelvis']}
 
-df = pandas.read_excel(mPowerDataFilename, usecols=columns, na_values='NA')
+###############################
+## Data constants
+###############################
+dataFilename = '../ExampleData.xlsx'
 
-def massage_dataframe (df):
+## mPower
+mPowerColumnDict = {'bool': ['Is Stat'], 'freeText': ['Report Text'],
+                    'category': ['Modality', 'Patient Status', 'Preliminary Report By',
+                                 'Exam Description', 'Accession Number'],
+                    'continuous': ['Exam Started to Exam Completed (minutes)',
+                                    'Exam Completed to Report Created (minutes)',
+                                    'Exam Completed to Preliminary Report (minutes)',
+                                    'Exam Completed to Report Finalized (minutes)',
+                                    'Preliminary Report to Report Finalized (minutes)'],
+                    'date': ['Exam Started Date', 'Exam Completed Date', 'Report Created Date',
+                             'Preliminary Report Date', 'Report Finalized Date']}
+mPowerColumns = mPowerColumnDict['continuous'] + mPowerColumnDict['date'] + \
+                mPowerColumnDict['bool'] + mPowerColumnDict['category'] + mPowerColumnDict['freeText'] 
 
-    return
+## AiDoc
+AiDocColumns = ['acc', 'result']
+
+## PACS
+PACSColumns = ['ACC', 'procedure', 'userfullname', 'UserRole', 'notetimestamp']
+
+## Dropdown columns
+dropdownColumns = mPowerColumnDict['continuous'] + mPowerColumnDict['date'] + \
+                  mPowerColumnDict['category'] + ['result', 'userfullname', 'UserRole'] + \
+                  ['Rad Open Date', 'Rad Read Duration (minutes)', 'Interarrival Time (minutes)']
+dateColumns = [col for col in dropdownColumns if 'Date' in col]
+continuousColumns = [col for col in dropdownColumns if '(minutes)' in col]
+categoryColumns = [col for col in dropdownColumns if not '(minutes)' in col and not 'Date' in col]
+
+## Special times
+AIDoc_start_date = pandas.to_datetime ('2021-04-21 00:00')
+business_hours = (8, 17) # 8am to 5pm
+#  Get holidays between 2014 and 2026
+holidayCal = USFederalHolidayCalendar()
+holidays = holidayCal.holidays(start='2014-01-01', end='2026-12-31').to_pydatetime()
+
+###############################
+## Dataframes
+###############################
+get_primaryAna = lambda array: numpy.nan if len (array)==0 else array[0]
+
+def random_with_N_digits(n):
+    range_start = 10**(n-1)
+    range_end = (10**n)-1
+    return randint(range_start, range_end)
+
+def find_anatomy (examDescriptions):
+
+    ## Hold all keywords that show up in 'Exam Description'
+    anatomies = {body:[] for body in BodyPartKeywords.keys()}
+
+    ## Loop through all descriptions
+    for examDes in examDescriptions:
+        ## Loop through all possible anatomies
+        for body, keywords in BodyPartKeywords.items():
+            if pandas.isna (examDes):
+                anatomies[body].append (False)
+                continue
+            hasBody = numpy.in1d (keywords, examDes.lower().split())
+            anatomies[body].append (hasBody.any())
+
+    ## Package anatomies dict for sub-information
+    anaInfo = pandas.DataFrame (anatomies)
+
+    ## Define a primary anatomy - ordered by anaInfo.columns
+    primaryAna = [get_primaryAna (anaInfo.columns[row.values])
+                  for index, row in anaInfo.iterrows()]
+    
+    return primaryAna, anaInfo
+
+def is_within_business_hours (row):
+
+    examCompletedDate = pandas.Timestamp (row['Exam Completed Date']).to_pydatetime()
+
+    ## Not business hours if holidays
+    if examCompletedDate in holidays: return False
+
+    ## Not business hours if sunday/saturday
+    if examCompletedDate.weekday() >= 5: return False
+
+    ## Within business hours if between business_hours
+    return numpy.logical_and (examCompletedDate.hour >= business_hours[0],
+                              examCompletedDate.hour < business_hours[1])  
+
+def get_truth (row):
+
+    text = row['Report Text'].split ('\n')
+
+    # Find the first line starts with 'PE: '
+    # If addendum, the first line is the correct one.
+    for line in text:
+        line = line.strip()
+        if len (line) == 0: continue
+        ## Look for the first line that starts with 'PE:'
+        if line.split ()[0].strip() == 'PE:':
+            # If empty after 'PE:', assume negative
+            if len (line.split()) == 1:
+                return numpy.array ([None, False])
+            # Record the radiologist decisions (full sentence)
+            decision = ' '.join (line.split ()[1:]).strip().lower()
+            if decision[-1] in ['.', ',']: decision = decision[:-1]
+            # Non-Diseased if 'negative' or 'no' (not sure about indeterminate or nondiagnostic)
+            values = decision.split ()
+            is_not_diseased = numpy.in1d (values, ['negative', 'no', 'indeterminate', 'nondiagnostic']).any()
+            return numpy.array ([decision, not is_not_diseased])
+
+    # Some doesn't have a 'PE:' line ...
+    return numpy.array (['missing', False])
+    
+def get_dataframe ():
+
+    ## Read all data
+    xls = pandas.ExcelFile(dataFilename)
+    mpower = pandas.read_excel(xls, 'mPower', usecols=mPowerColumns, na_values='NA')
+    pacs = pandas.read_excel(xls, 'CT PE Studies', usecols=PACSColumns, na_values='NA')
+    aidoc = pandas.read_excel(xls, 'Aidoc Studies', usecols=AiDocColumns, na_values='NA')
+
+    ## Make sure all accession number columns are read as string
+    mpower['Accession Number'] = mpower['Accession Number'].values.astype (str)
+    aidoc['acc'] = aidoc['acc'].values.astype (str)
+    pacs['ACC'] = pacs['ACC'].values.astype (str)
+
+    ## Format datetime columns
+    #  1. timestamp for radiologist open time
+    pacs['Rad Open Date'] = pandas.to_datetime (pacs['notetimestamp'])
+    pacs = pacs.drop (['notetimestamp'], axis=1)
+    #  2. timestamps related to patients from mPower
+    for timestampColumn in mPowerColumnDict['date']:
+        mpower[timestampColumn] = pandas.to_datetime (mpower[timestampColumn])
+
+    ## Merge all three frames by accession number
+    ## Ignore entries that does not appear in either mpower or pacs
+    merged = mpower.merge (pacs, left_on='Accession Number', right_on='ACC', how='inner')
+    merged = merged.merge (aidoc, left_on='Accession Number', right_on='acc', how='outer')
+    merged['Accession Number'] = merged['Accession Number'].combine_first (merged['acc']).combine_first (merged['ACC'])
+    merged = merged.drop (['acc', 'ACC'], axis=1)
+
+    ## Remove cases with n/a 'Report Finalized Date' and 'Exam Completed Date' and 'Rad Open Date'
+    merged = merged.dropna (axis=0, subset=['Report Finalized Date', 'Exam Completed Date', 'Rad Open Date'])
+
+    ## For pacs, multiple entries for same acc because different radiologists read the same case
+    ## Find the one that is closest to, but before, 'Report Finalized Date' in mpower
+    indices = []
+    accgroups = merged.groupby ('Accession Number')
+    for acc in accgroups.groups:
+        agroup = accgroups.get_group (acc)
+        agroup = agroup[agroup['Report Finalized Date'] > agroup['Rad Open Date']]
+        # Drop cases where finalized date is before all radiologist open dates
+        if len (agroup) == 0: continue
+        finalizedDate = agroup['Report Finalized Date'].values[0]
+        indices.append ((finalizedDate - agroup['Rad Open Date']).idxmin())
+    merged = merged.loc[indices]
+
+    ## Sort entries by exam completed date i.e. timestamps when the patient enters reading list
+    merged = merged.sort_values (by='Exam Completed Date')
+
+    ## Calculate time differences
+    #  1. Radiologist reading time
+    merged['Rad Read Duration (minutes)'] = (merged['Report Finalized Date'] - merged['Rad Open Date']).dt.total_seconds()/60
+    #  2. Interarrival time
+    interarrivalTime = (merged['Exam Completed Date'].values[1:] - merged['Exam Completed Date'].values[:-1])/1e9/60
+    merged = merged.iloc[1:]
+    merged['Interarrival Time (minutes)'] = interarrivalTime.astype (float)
+
+    ## Add in flags
+    #  1. Exam completed within business hours?
+    merged['Within Business Hours'] = [is_within_business_hours (row) for _, row in merged.iterrows()]
+    #  2. Exam to be read by AI (i.e. non-emergency class)?
+    merged['Is CADt Non-Emergency Class'] = merged['Patient Status'].isin (['Inpatient', 'Outpatient'])
+    #  3. Patient truly diseased / non-diseased with PE?
+    merged['Rad Decision'], Diseased_PE = numpy.array ([get_truth (row) for _, row in merged.iterrows()]).T
+    merged['Diseased PE'] = Diseased_PE == 'True'
+
+    ## Separate without-CADt scenario from with-CADt scenario
+    #withoutCADt = merged[merged['Exam Completed Date'] < AIDoc_start_date]
+    #withCADt = merged[merged['Exam Completed Date'] >= AIDoc_start_date]
+
+    return merged
+
+df = get_dataframe()
 
 ###############################
 ## Dash app functions
@@ -77,7 +249,7 @@ def massage_dataframe (df):
 def generate_figure (dataframe, selected_column, nbins, yaxis_type, date_by_type):
 
     ## If no valid entries, return a histogram which will not be displayed anyways
-    series = df[selected_column]
+    series = dataframe[selected_column]
     if len (series[~series.isna()]) == 0:
         return px.histogram(df, x=selected_column) 
 
@@ -94,7 +266,7 @@ def generate_figure (dataframe, selected_column, nbins, yaxis_type, date_by_type
                      '%Y-%m-%d' if date_by_type == 'Day' else \
                      '%Y-%m-%d %H' ## by hour
 
-        subdf = df[selected_column].dt.strftime (timeFormat).value_counts()
+        subdf = series.dt.strftime (timeFormat).value_counts()
         argsort = numpy.argsort (subdf.index)
         fig = go.Figure(data=go.Scatter(x=subdf.index[argsort], 
                                         y=subdf.values[argsort],
@@ -175,11 +347,14 @@ def generate_table(dataframe, selected_column):
 def define_style (dataframe, selected_column):
 
     ids = ['nbins', 'nbins-text', 'graphic-div', 'yaxis-type', 'yaxis-scale-p',
-           'graphic-noValid-div', 'date-by-p', 'date-by-type']
+           'graphic-noValid-div', 'date-by-p', 'date-by-type', 'group-by-truth',
+           'group-by-truth-p', 'group-by-businessHours', 'group-by-businessHours-p',
+           'group-by-cadtClass', 'group-by-cadtClass-p']
     styles = {anId: {'display': 'none'} for anId in ids}
 
     ## Make sure there are valid entries for the selected column
     series = dataframe[selected_column]
+    
     if len (series[~series.isna()]) > 0 :
         ## Show thses elements:
         styles['graphic-div'] = {'display': 'block'} 
@@ -195,6 +370,15 @@ def define_style (dataframe, selected_column):
         if selected_column in dateColumns:
             styles['date-by-p'] = {'display':'inline-block','margin-right':20}
             styles['date-by-type'] = {'display': 'block'}
+        
+        styles['group-by-truth-p'] = {'display':'inline-block','margin-right':20}
+        styles['group-by-truth'] = {'display': 'block'}
+
+        styles['group-by-businessHours-p'] = {'display':'inline-block','margin-right':20}
+        styles['group-by-businessHours'] = {'display': 'block'}           
+
+        styles['group-by-cadtClass-p'] = {'display':'inline-block','margin-right':20}
+        styles['group-by-cadtClass'] = {'display': 'block'} 
 
     else:
         ## Show no-valid message
@@ -219,7 +403,7 @@ app.layout = html.Div (children=[
 
         html.Div([
             dcc.Dropdown(
-                continuousColumns + dateColumns + categoryColumns,
+                dropdownColumns,
                 'Patient Status',
                 id='xaxis-column'
             )
@@ -253,7 +437,55 @@ app.layout = html.Div (children=[
                     inputStyle={"margin-right": "10px", "margin-top": "5px"}
                 )
             ],style={'display': 'block'})
-        ], style={'display': 'inline-block', 'width':170}),
+        ], style={'display': 'inline-block', 'margin-right':30}),
+
+        html.Div (children=[
+            html.Div([
+                html.P('Business Hour subgroups:', id='group-by-businessHours-p',
+                    style={'display':'none'}),
+                dcc.RadioItems(
+                    ['All', 'Within hours', 'Outside hours'],
+                    'All',
+                    id='group-by-businessHours',
+                    inline=False,
+                    labelStyle={'display': 'block'},
+                    inputStyle={"margin-right": "15px", "margin-top": "5px"},
+                    style={'display':'none'}
+                )
+            ],style={'display': 'block'})
+        ], style={'display': 'inline-block', 'margin-right':30}),
+
+        html.Div (children=[
+            html.Div([
+                html.P('Truth subgroups:', id='group-by-truth-p',
+                    style={'display':'none'}),
+                dcc.RadioItems(
+                    ['All', 'Diseased', 'Non-Diseased'],
+                    'All',
+                    id='group-by-truth',
+                    inline=False,
+                    labelStyle={'display': 'block'},
+                    inputStyle={"margin-right": "15px", "margin-top": "5px"},
+                    style={'display':'none'}
+                )
+            ],style={'display': 'block'})
+        ], style={'display': 'inline-block', 'margin-right':30}),
+
+        html.Div (children=[
+            html.Div([
+                html.P('CADt nonEmergency subgroups:', id='group-by-cadtClass-p',
+                    style={'display':'none'}),
+                dcc.RadioItems(
+                    ['All', 'Emergency', 'Non-Emergency'],
+                    'All',
+                    id='group-by-cadtClass',
+                    inline=False,
+                    labelStyle={'display': 'block'},
+                    inputStyle={"margin-right": "15px", "margin-top": "5px"},
+                    style={'display':'none'}
+                )
+            ],style={'display': 'block'})
+        ], style={'display': 'inline-block', 'margin-right':30}),        
 
         html.Div(children=[
             html.P('Enter Number of bins:', id='nbins-text',
@@ -280,6 +512,8 @@ app.layout = html.Div (children=[
 
     ]),
 
+    html.Br(),
+
     html.Div ([
         html.Div ([
             dcc.Graph(id='graphic')
@@ -303,30 +537,62 @@ app.layout = html.Div (children=[
     Output('yaxis-scale-p', 'style'),
     Output('date-by-type', 'style'),  
     Output('date-by-p', 'style'),      
+    Output('group-by-truth', 'style'),   
+    Output('group-by-truth-p', 'style'),
+    Output('group-by-businessHours', 'style'),
+    Output('group-by-businessHours-p', 'style'),
+    Output('group-by-cadtClass', 'style'),   
+    Output('group-by-cadtClass-p', 'style'),  
     Output('graphic-noValid-div', 'style'),  
     Input('nbins', 'value'),
     Input('xaxis-column', 'value'),
     Input('yaxis-type', 'value'),
-    Input('date-by-type', 'value')
+    Input('date-by-type', 'value'),
+    Input('group-by-truth', 'value'),
+    Input('group-by-businessHours', 'value'),
+    Input('group-by-cadtClass', 'value')
     )
-def update_histo(nbins, selected_column, yaxis_type, date_by_type):
+def update_histo(nbins, selected_column, yaxis_type, date_by_type, group_by_truth,
+                 group_by_busniessHours, group_by_CADtClass):
 
     ## Set default values if not provided
     if selected_column is None: selected_column = 'Patient Status'
     if nbins is None: nbins = 10
 
+    ## If selected group by truth, slice it
+    dataframe = deepcopy (df)
+    if group_by_truth == 'Diseased':
+        dataframe = dataframe[dataframe['Diseased PE']]
+    elif group_by_truth == 'Non-Diseased':
+        dataframe = dataframe[~dataframe['Diseased PE']]
+
+    ## If selected group by busniessHours, slice it
+    if group_by_busniessHours == 'Within hours':
+        dataframe = dataframe[dataframe['Within Business Hours']]
+    elif group_by_busniessHours == 'Outside hours':
+        dataframe = dataframe[~dataframe['Within Business Hours']]
+
+    ## If selected group by cadtClass, slice it
+    if group_by_CADtClass == 'Non-Emergency':
+        dataframe = dataframe[dataframe['Is CADt Non-Emergency Class']]
+    elif group_by_CADtClass == 'Emergency':
+        dataframe = dataframe[~dataframe['Is CADt Non-Emergency Class']]
+
     ## Update figure
-    fig = generate_figure (df, selected_column, nbins, yaxis_type, date_by_type)
+    fig = generate_figure (dataframe, selected_column, nbins, yaxis_type, date_by_type)
 
     ## Update display
-    styles = define_style (df, selected_column)
+    styles = define_style (dataframe, selected_column)
 
     ## Update table
-    statsTable = generate_table(df, selected_column)
+    statsTable = generate_table(dataframe, selected_column)
 
     return fig, selected_column, statsTable, styles['nbins'], styles['nbins-text'], \
            styles['graphic-div'], styles['yaxis-type'], styles['yaxis-scale-p'], \
-           styles['date-by-type'], styles['date-by-p'], styles['graphic-noValid-div']
+           styles['date-by-type'], styles['date-by-p'], styles['group-by-truth'], \
+           styles['group-by-truth-p'], styles['group-by-businessHours'], \
+           styles['group-by-businessHours-p'], styles['group-by-cadtClass'], \
+           styles['group-by-cadtClass-p'], styles['graphic-noValid-div']
 
 if __name__ == '__main__':
     app.run_server(debug=True)

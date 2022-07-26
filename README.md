@@ -21,7 +21,7 @@ cd  pathtoextractedFolder\cadtDash-main
 python3 -m venv .
 
 ## 2. Source the environment
-.\Scripts\activatecd
+.\Scripts\activate
 # source bin/activate # if Linux/bash
 
 ## 3. Install all required packages
@@ -31,7 +31,11 @@ The last step may take awhile.  If the installation hangs, you may have to press
 
 ## Usage
 
-First, put your file "mPowerExampleData.xlsx" in the pathtoextractedFolder\cadtDash-main folder.
+First, put your file "ExampleData.xlsx" in the pathtoextractedFolder\cadtDash-main folder.
+This Excel file must have three sheets in the following orders: 
+- 'CT PE Studies' from PACS
+- Aidoc Studies from AIDoc
+- mPower from mPower
 
 Then, run the python script.
 ```bash
