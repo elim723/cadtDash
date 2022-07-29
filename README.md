@@ -2,19 +2,19 @@
 
 cadtDash is a Python library that visualizes clinical data via a web interface.
 
-## Installation
+***
+
+## First Time Installation
 
 This tool is deveoped using Python 3.9.4. A requirement.txt is provided to set up a virtual environment for this tool. 
 
-If this is your first time, you will need to set up a virtual environment. If you are updating the software to the latest version, you may re-use the previous environment unless new packages are included in the requirements.txt.
+If this is your first time, you will need to set up a virtual environment. If you are updating the software to the latest version, you may re-use the previous environment unless new packages are included in the requirements.txt (see Update Repo below)
 
-### First time installation
-
-#### Cloning
+### Cloning
 
 There are two ways: one through the GitHub repo interface, and the other via terminal. The following steps assume a Windows operating system but can be easily converted to Unix or Linux systems.
 
-##### Via the GitHub repo interface
+#### Via the GitHub repo interface
 
 1. Click the above green “Code” button, then click “Download Zip”. A cadtDash-main.zip file will be downloaded.
 
@@ -22,7 +22,7 @@ There are two ways: one through the GitHub repo interface, and the other via ter
 
 3. In the working folder, there is a sub-folder called cadtDash-main: `\you\path\to\cadtDash-main\cadtDash-main\`. This is where all the codes are located.
 
-##### Via terminal (Windows PowerShell)
+#### Via terminal (Windows PowerShell)
 
 1. Click the magnifying glass in the Windows menu to search for "Windows PowerShell". A terminal will pop up.
 
@@ -45,11 +45,11 @@ git clone https://github.com/elim723/cadtDash.git cadtDash-main
 
 All the codes are located in the folder `\you\path\to\cadtDash-main\cadtDash-main\`. 
 
-#### Create virtual environment
+### Create virtual environment
 
 There are two ways: one through Anaconda in Anaconda prompt, and the other using pip in Windows PowerShell. 
 
-##### Via Anaconda
+#### Via Anaconda
 
 1. Click the magnifying glass in the Windows menu to search for "Anaconda prompt". A terminal will pop up.
 
@@ -73,7 +73,7 @@ pip install -r cadtDash-main/requirements.txt
 
 The last step may take awhile. If the installation hangs, you may have to press the enter key.
 
-##### Via Pip
+#### Via Pip
 
 1. If you haven't had a terminal opened, click the magnifying glass in the Windows menu to search for "Windows PowerShell". A terminal will pop up.
 
@@ -102,9 +102,24 @@ pip install -r cadtDash-main/requirements.txt
 
 The last step may take awhile. If the installation hangs, you may have to press the enter key.
 
-### Update repo
+***
 
+## Update Repo
 
+To update a cloned repo, simply pull the latest version via terminal.
+
+```bash
+
+## 1. Proceed to the sub-folder
+cd  \you\path\to\cadtDash-main\cadtDash-main\
+
+## 2. Pull the latest version
+git pull
+```
+
+Note the print out from command. If `requirements.txt` is changed, you may need to install some new packages for this updates. See First Time Installation secion on how to use `requirements.txt`.
+
+***
 
 ## Usage
 
@@ -145,6 +160,8 @@ Dash is running on http://127.0.0.1:8050/
 ```
 
 4. Open a web browser (preferably Edge or Chrome) and enter the URL in the message. For example, the above message says the URL is "http://127.0.0.1:8050/". The dashboard will show up.
+
+***
 
 ## Exit
 
