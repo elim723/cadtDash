@@ -62,41 +62,43 @@ BodyPartKeywords = {'chest':['chest'],
 ## Data constants
 ###############################
 dataFilename = '../ExampleData.xlsx'
+aiDocFilename = '../AiDocAllPE.xlsx'
 
 ## mPower
 mPowerColumnDict = {'bool': ['Is Stat'], 'freeText': ['Report Text'],
-                    'category': ['Modality', 'Patient Status', 'Preliminary Report By',
+                    'category': ['Modality', 'Patient Status',
                                  'Exam Description', 'Accession Number'],
-                    'continuous': ['Exam Started to Exam Completed (minutes)',
-                                    'Exam Completed to Report Created (minutes)',
-                                    'Exam Completed to Preliminary Report (minutes)',
-                                    'Exam Completed to Report Finalized (minutes)',
-                                    'Preliminary Report to Report Finalized (minutes)'],
-                    'date': ['Exam Started Date', 'Exam Completed Date', 'Report Created Date',
+                    'continuous': ['Exam Completed to Report Created (minutes)',
+                                   'Exam Completed to Preliminary Report (minutes)',
+                                   'Exam Completed to Report Finalized (minutes)',
+                                   'Preliminary Report to Report Finalized (minutes)'],
+                    'date': ['Exam Completed Date', 'Report Created Date',
                              'Preliminary Report Date', 'Report Finalized Date']}
 mPowerColumns = mPowerColumnDict['continuous'] + mPowerColumnDict['date'] + \
                 mPowerColumnDict['bool'] + mPowerColumnDict['category'] + mPowerColumnDict['freeText'] 
 
 ## AiDoc
-AiDocColumns = ['acc', 'result']
+AiDocColumns = ['Creation Date', 'Creation Time', 'Accession Number', 'Positive/Negative']
 
 ## PACS
 PACSColumns = ['ACC', 'procedure', 'userfullname', 'UserRole', 'notetimestamp']
 
 ## Dropdown columns
 dropdownColumns = mPowerColumnDict['continuous'] + mPowerColumnDict['date'] + \
-                  mPowerColumnDict['category'] + ['result', 'userfullname', 'UserRole'] + \
+                  mPowerColumnDict['category'] + ['AI Result', 'userfullname', 'UserRole'] + \
                   ['Rad Open Date', 'Rad Read Duration (minutes)', 'Interarrival Time (minutes)']
 dateColumns = [col for col in dropdownColumns if 'Date' in col]
 continuousColumns = [col for col in dropdownColumns if '(minutes)' in col]
 categoryColumns = [col for col in dropdownColumns if not '(minutes)' in col and not 'Date' in col]
 
 ## Special times
-AIDoc_start_date = pandas.to_datetime ('2021-04-21 00:00')
+AIDoc_start_date = pandas.to_datetime ('2019-11-27 00:00')
 business_hours = (8, 17) # 8am to 5pm
 #  Get holidays between 2014 and 2026
 holidayCal = USFederalHolidayCalendar()
 holidays = holidayCal.holidays(start='2014-01-01', end='2026-12-31').to_pydatetime()
+#  Threshold for interarrival time in minutes - 1 month
+interarrivalTimeGapThresh = 30*24*60
 
 ###############################
 ## Dataframes
@@ -177,12 +179,14 @@ def get_dataframe ():
     xls = pandas.ExcelFile(dataFilename)
     mpower = pandas.read_excel(xls, 'mPower', usecols=mPowerColumns, na_values='NA')
     pacs = pandas.read_excel(xls, 'CT PE Studies', usecols=PACSColumns, na_values='NA')
-    aidoc = pandas.read_excel(xls, 'Aidoc Studies', usecols=AiDocColumns, na_values='NA')
+    xls = pandas.ExcelFile(aiDocFilename)
+    aidoc = pandas.read_excel(xls, usecols=AiDocColumns, na_values='NA')
 
     ## Make sure all accession number columns are read as string
     mpower['Accession Number'] = mpower['Accession Number'].values.astype (str)
-    aidoc['acc'] = aidoc['acc'].values.astype (str)
     pacs['ACC'] = pacs['ACC'].values.astype (str)
+    aidoc['Accession Number AiDoc'] = aidoc['Accession Number'].values.astype (int).astype (str)
+    aidoc = aidoc.drop (['Accession Number'], axis=1)
 
     ## Format datetime columns
     #  1. timestamp for radiologist open time
@@ -193,12 +197,16 @@ def get_dataframe ():
         mpower[timestampColumn] = pandas.to_datetime (mpower[timestampColumn])
 
     ## Merge all three frames by accession number
-    ## Ignore entries that does not appear in either mpower or pacs
+    ## Inner between PACS and mPower because need both info for the same patient
     merged = mpower.merge (pacs, left_on='Accession Number', right_on='ACC', how='inner')
-    merged = merged.merge (aidoc, left_on='Accession Number', right_on='acc', how='outer')
-    merged['Accession Number'] = merged['Accession Number'].combine_first (merged['acc']).combine_first (merged['ACC'])
-    merged = merged.drop (['acc', 'ACC'], axis=1)
+    ## Outer between PACS/mPower and AiDoc because patients may be admitted before AiDoc is implemented
+    merged = merged.merge (aidoc, left_on='Accession Number', right_on='Accession Number AiDoc', how='outer')
+    ## Merged by accession number
+    merged['Accession Number'] = merged['Accession Number'].combine_first (merged['Accession Number AiDoc']).combine_first (merged['ACC'])
+    merged = merged.drop (['Accession Number AiDoc', 'ACC'], axis=1)
 
+    ## Drop any rows that have AiDoc data but not PACS/mPower
+    merged = merged[~merged['Modality'].isna ()]
     ## Remove cases with n/a 'Report Finalized Date' and 'Exam Completed Date' and 'Rad Open Date'
     merged = merged.dropna (axis=0, subset=['Report Finalized Date', 'Exam Completed Date', 'Rad Open Date'])
 
@@ -225,19 +233,21 @@ def get_dataframe ():
     interarrivalTime = (merged['Exam Completed Date'].values[1:] - merged['Exam Completed Date'].values[:-1])/1e9/60
     merged = merged.iloc[1:]
     merged['Interarrival Time (minutes)'] = interarrivalTime.astype (float)
+    #     Exam Completed Date has a gap between 2021-12-31 and 2021-4-22.
+    #     Remove the first entry after a month of gap to avoid outliers
+    #     Q: What is a reasonable threshold?
+    merged = merged[merged['Interarrival Time (minutes)'] < interarrivalTimeGapThresh]
 
-    ## Add in flags
+    ## Add in flags / renaming columns
     #  1. Exam completed within business hours?
     merged['Within Business Hours'] = [is_within_business_hours (row) for _, row in merged.iterrows()]
-    #  2. Exam to be read by AI (i.e. non-emergency class)?
+    #  2. Exam being non-emergency class? 
     merged['Is CADt Non-Emergency Class'] = merged['Patient Status'].isin (['Inpatient', 'Outpatient'])
     #  3. Patient truly diseased / non-diseased with PE?
     merged['Rad Decision'], Diseased_PE = numpy.array ([get_truth (row) for _, row in merged.iterrows()]).T
     merged['Diseased PE'] = Diseased_PE == 'True'
-
-    ## Separate without-CADt scenario from with-CADt scenario
-    #withoutCADt = merged[merged['Exam Completed Date'] < AIDoc_start_date]
-    #withCADt = merged[merged['Exam Completed Date'] >= AIDoc_start_date]
+    #  4. Rename AI result column
+    merged = merged.rename (columns={'Positive/Negative':'AI Result'})
 
     return merged
 
@@ -254,7 +264,14 @@ def generate_figure (dataframe, selected_column, nbins, yaxis_type, date_by_type
         return px.histogram(df, x=selected_column) 
 
     if selected_column in categoryColumns:
-        fig = px.histogram(dataframe, x=selected_column)
+
+        category_orders = None
+        if selected_column == 'userfullname':
+            category_orders = dict (userfullname=list (dataframe['userfullname'].value_counts().index))
+        elif selected_column == 'UserRole':
+            category_orders = dict (UserRole=list (dataframe['UserRole'].value_counts().index))
+
+        fig = px.histogram(dataframe, x=selected_column, category_orders=category_orders)
 
     elif selected_column in continuousColumns:
         fig = px.histogram(dataframe, x=selected_column, nbins=nbins)
@@ -348,8 +365,9 @@ def define_style (dataframe, selected_column):
 
     ids = ['nbins', 'nbins-text', 'graphic-div', 'yaxis-type', 'yaxis-scale-p',
            'graphic-noValid-div', 'date-by-p', 'date-by-type', 'group-by-truth',
-           'group-by-truth-p', 'group-by-businessHours', 'group-by-businessHours-p',
-           'group-by-cadtClass', 'group-by-cadtClass-p']
+           'group-by-truth-p', 'group-by-AIresult', 'group-by-AIresult-p',
+           'group-by-afterAI', 'group-by-afterAI-p', 'group-by-businessHours',
+           'group-by-businessHours-p', 'group-by-cadtClass', 'group-by-cadtClass-p']
     styles = {anId: {'display': 'none'} for anId in ids}
 
     ## Make sure there are valid entries for the selected column
@@ -373,6 +391,12 @@ def define_style (dataframe, selected_column):
         
         styles['group-by-truth-p'] = {'display':'inline-block','margin-right':20}
         styles['group-by-truth'] = {'display': 'block'}
+
+        styles['group-by-AIresult-p'] = {'display':'inline-block','margin-right':20}
+        styles['group-by-AIresult'] = {'display': 'block'}
+
+        styles['group-by-afterAI-p'] = {'display':'inline-block','margin-right':20}
+        styles['group-by-afterAI'] = {'display': 'block'}
 
         styles['group-by-businessHours-p'] = {'display':'inline-block','margin-right':20}
         styles['group-by-businessHours'] = {'display': 'block'}           
@@ -473,6 +497,38 @@ app.layout = html.Div (children=[
 
         html.Div (children=[
             html.Div([
+                html.P('AI call subgroups:', id='group-by-AIresult-p',
+                    style={'display':'none'}),
+                dcc.RadioItems(
+                    ['All', 'AI Positive', 'AI Negative'],
+                    'All',
+                    id='group-by-AIresult',
+                    inline=False,
+                    labelStyle={'display': 'block'},
+                    inputStyle={"margin-right": "15px", "margin-top": "5px"},
+                    style={'display':'none'}
+                )
+            ],style={'display': 'block'})
+        ], style={'display': 'inline-block', 'margin-right':30}),
+
+        html.Div (children=[
+            html.Div([
+                html.P('AI use subgroups:', id='group-by-afterAI-p',
+                    style={'display':'none'}),
+                dcc.RadioItems(
+                    ['All', 'Before use of AI', 'After use of AI'],
+                    'All',
+                    id='group-by-afterAI',
+                    inline=False,
+                    labelStyle={'display': 'block'},
+                    inputStyle={"margin-right": "15px", "margin-top": "5px"},
+                    style={'display':'none'}
+                )
+            ],style={'display': 'block'})
+        ], style={'display': 'inline-block', 'margin-right':30}),
+
+        html.Div (children=[
+            html.Div([
                 html.P('CADt nonEmergency subgroups:', id='group-by-cadtClass-p',
                     style={'display':'none'}),
                 dcc.RadioItems(
@@ -539,6 +595,10 @@ app.layout = html.Div (children=[
     Output('date-by-p', 'style'),      
     Output('group-by-truth', 'style'),   
     Output('group-by-truth-p', 'style'),
+    Output('group-by-AIresult', 'style'),   
+    Output('group-by-AIresult-p', 'style'),
+    Output('group-by-afterAI', 'style'),   
+    Output('group-by-afterAI-p', 'style'),    
     Output('group-by-businessHours', 'style'),
     Output('group-by-businessHours-p', 'style'),
     Output('group-by-cadtClass', 'style'),   
@@ -549,11 +609,13 @@ app.layout = html.Div (children=[
     Input('yaxis-type', 'value'),
     Input('date-by-type', 'value'),
     Input('group-by-truth', 'value'),
+    Input('group-by-AIresult', 'value'),
+    Input('group-by-afterAI', 'value'),
     Input('group-by-businessHours', 'value'),
     Input('group-by-cadtClass', 'value')
     )
 def update_histo(nbins, selected_column, yaxis_type, date_by_type, group_by_truth,
-                 group_by_busniessHours, group_by_CADtClass):
+                 group_by_AIresult, group_by_afterAI, group_by_busniessHours, group_by_CADtClass):
 
     ## Set default values if not provided
     if selected_column is None: selected_column = 'Patient Status'
@@ -565,6 +627,21 @@ def update_histo(nbins, selected_column, yaxis_type, date_by_type, group_by_trut
         dataframe = dataframe[dataframe['Diseased PE']]
     elif group_by_truth == 'Non-Diseased':
         dataframe = dataframe[~dataframe['Diseased PE']]
+
+    ## If selected group by AI positive/negative, slice it
+    ## Note that by selecting AI positive/negative, it is implied that data is collected after AI use.
+    if group_by_AIresult == 'AI Positive':
+        group_by_AIresult = 'After use of AI'
+        dataframe = dataframe[dataframe['AI Result'] == 'P']
+    elif group_by_AIresult == 'AI Negative':
+        group_by_AIresult = 'After use of AI'
+        dataframe = dataframe[dataframe['AI Result'] == 'N']
+
+    ## If selected group by before / after use of AI, slice it
+    if group_by_afterAI == 'Before use of AI':
+        dataframe = dataframe[dataframe['Exam Completed Date'] < AIDoc_start_date]
+    elif group_by_afterAI == 'After use of AI':
+        dataframe = dataframe[dataframe['Exam Completed Date'] >= AIDoc_start_date]
 
     ## If selected group by busniessHours, slice it
     if group_by_busniessHours == 'Within hours':
@@ -590,7 +667,9 @@ def update_histo(nbins, selected_column, yaxis_type, date_by_type, group_by_trut
     return fig, selected_column, statsTable, styles['nbins'], styles['nbins-text'], \
            styles['graphic-div'], styles['yaxis-type'], styles['yaxis-scale-p'], \
            styles['date-by-type'], styles['date-by-p'], styles['group-by-truth'], \
-           styles['group-by-truth-p'], styles['group-by-businessHours'], \
+           styles['group-by-truth-p'], styles['group-by-AIresult'], \
+           styles['group-by-AIresult-p'], styles['group-by-afterAI'], \
+           styles['group-by-afterAI-p'], styles['group-by-businessHours'], \
            styles['group-by-businessHours-p'], styles['group-by-cadtClass'], \
            styles['group-by-cadtClass-p'], styles['graphic-noValid-div']
 
