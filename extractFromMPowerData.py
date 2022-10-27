@@ -36,6 +36,12 @@
 ##  - From "Report Text", try to extract disease to be tested, radiologist 
 ##    diagnosis, and other timing information
 ## 
+##
+## 10/26/2022
+## ----------
+##   * Added AI call and AI use subgroup options
+##   * Use the updated AiDocALLPE.xlsx for AiDoc dataframe
+##   * Radiologist names and user role hisograms re-ordered
 ##################################################################################
 
 ###############################
