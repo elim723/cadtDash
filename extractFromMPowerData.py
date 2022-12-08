@@ -71,7 +71,7 @@ BodyPartKeywords = {'chest':['chest'],
                     'abdomen':['abd', 'abdomen'],
                     'pelvis':['pelvis']}
 
-badFitThresh = 8
+badFitPerrThresh = 8
 
 ###############################
 ## Data constants
@@ -137,7 +137,6 @@ def get_histo (values, nbins, time_thresh):
     wvalues[numpy.where (wvalues==0)] = 1e-20
 
     is_valid = numpy.logical_and (numpy.logical_and (numpy.isfinite (xvalues), numpy.isfinite(yvalues)), numpy.isfinite(wvalues))
-    is_valid = numpy.logical_and (is_valid, yvalues > 5)
 
     return xvalues[is_valid], yvalues[is_valid], wvalues[is_valid]
 
@@ -331,24 +330,40 @@ def generate_figure (dataframe, selected_column, nbins, yaxis_type, date_by_type
             popt = None
             good_fit = False
             bounds = [[-numpy.inf, 0], [numpy.inf, numpy.inf]]
-            try:
-                popt, pcov = curve_fit(lambda x, a, b: expfunc(x, a, b, time_thresh), xvalues, yvalues, sigma=1/wvalues, p0=[1, 1], bounds=bounds)
-                perr = numpy.sqrt(numpy.diag(pcov))
-                good_fit = True
-                if verbose:
-                    print ('+-----------------------------------------------------------')
-                    print ('| p0 = [1, 1]: {0}'.format (perr))
-                if not numpy.isfinite (perr).any() or  (perr > badFitThresh).any():
-                    good_fit = False
-                    popt, pcov = curve_fit(lambda x, a, b: expfunc(x, a, b, time_thresh), xvalues, yvalues, sigma=1/wvalues, p0=[1, 0], bounds=bounds)
-                    perr = numpy.sqrt(numpy.diag(pcov))
-                    good_fit = True
-                    if not numpy.isfinite (perr).any() or  (perr > badFitThresh).any(): good_fit = False
-                    if verbose: print ('p0 = [1, 0]: {0}'.format (perr))
-            except:
-                good_fit = False
 
-            if good_fit and popt[1] < 0: good_fit = False
+            has_enough = yvalues > 5
+            has_enough_valid_bins = len (has_enough[has_enough]) > 3
+            if has_enough_valid_bins:
+                popt_p0_11, popt_p0_10 = None, None
+                perr_p0_11, perr_p0_10 = None, None
+                good_fit_p0_11, good_fit_p0_10 = False, False
+                try:
+                    popt_p0_11, pcov = curve_fit(lambda x, a, b: expfunc(x, a, b, time_thresh), xvalues, yvalues, sigma=1/wvalues, p0=[1, 1], bounds=bounds)
+                    perr_p0_11 = numpy.sum (numpy.sqrt(numpy.diag(pcov)))
+                    if verbose:
+                        print ('+-----------------------------------------------------------')
+                        print ('| p0 = [1, 1]: {0}'.format (perr_p0_11))
+                    good_fit_p0_11 = True
+                except:
+                    good_fit_p0_11 = False
+
+                try:
+                    popt_p0_10, pcov = curve_fit(lambda x, a, b: expfunc(x, a, b, time_thresh), xvalues, yvalues, sigma=1/wvalues, p0=[1, 0], bounds=bounds)
+                    perr_p0_10 = numpy.sum (numpy.sqrt(numpy.diag(pcov)))
+                    if verbose: print ('| p0 = [1, 0]: {0}'.format (perr_p0_10))
+                    good_fit_p0_10 = True
+                except:
+                    good_fit_p0_10 = False
+
+                if good_fit_p0_11 and not good_fit_p0_10:
+                    popt, perr = popt_p0_11, perr_p0_11
+                elif good_fit_p0_10 and not good_fit_p0_11:
+                    popt, perr = popt_p0_10, perr_p0_10
+                else:
+                    popt = popt_p0_11 if perr_p0_11 < perr_p0_10 else popt_p0_10
+                    perr = min (perr_p0_11, perr_p0_10)
+
+                good_fit = perr < badFitPerrThresh and popt[1] > 0
 
             if good_fit:
                 xs = numpy.linspace(0, xvalues[-1], 1000)
@@ -362,7 +377,7 @@ def generate_figure (dataframe, selected_column, nbins, yaxis_type, date_by_type
                 error_y = go.bar.ErrorY (array=wvalues)
                 fig = px.bar (x=xvalues, y=yvalues, error_y=wvalues)
 
-            fitTable = None if popt is None else createFitTable (popt, perr, isArrival=selected_column=='Interarrival Time (minutes)')
+            fitTable = None if not good_fit else createFitTable (popt, perr, isArrival=selected_column=='Interarrival Time (minutes)')
         
     else: ## time-series
 
@@ -519,7 +534,7 @@ def define_style (dataframe, selected_column, fitTable):
             styles['interopen-thresh'] = {'display': 'block', 'height':35}
 
         if fitTable is not None:
-            styles['fit-table-container'] = {'display':'inline-block', 'width':600}
+            styles['fit-table-container'] = {'display':'inline-block', 'width':800}
         elif selected_column in ['Interopen Time (minutes)', 'Interarrival Time (minutes)']:
             styles['fit-table-container-bad-fit-p']  = {'display':'inline-block', "font-weight": "bold", 'fontSize':14}
 
@@ -537,20 +552,40 @@ def perform_fit (values, time_thresh=numpy.inf, nbins=50):
     popt = None
     good_fit = False
     bounds = [[-numpy.inf, 0], [numpy.inf, numpy.inf]]
-    try:
-        popt, pcov = curve_fit(lambda x, a, b: expfunc(x, a, b, time_thresh), xvalues, yvalues, sigma=1/wvalues, p0=[1, 1], bounds=bounds)
-        perr = numpy.sqrt(numpy.diag(pcov))
-        good_fit = True
-        if not numpy.isfinite (perr).any() or  (perr > badFitThresh).any():
-            good_fit = False
-            popt, pcov = curve_fit(lambda x, a, b: expfunc(x, a, b, time_thresh), xvalues, yvalues, sigma=1/wvalues, p0=[1, 0], bounds=bounds)
-            perr = numpy.sqrt(numpy.diag(pcov))
-            good_fit = True
-            if not numpy.isfinite (perr).any() or  (perr > badFitThresh).any(): good_fit = False
-    except:
-        good_fit = False
 
-    if good_fit and popt[1] < 0: good_fit = False
+    has_enough = yvalues > 5
+    has_enough_valid_bins = len (has_enough[has_enough]) > 3
+    if has_enough_valid_bins:
+        popt_p0_11, popt_p0_10 = None, None
+        perr_p0_11, perr_p0_10 = None, None
+        good_fit_p0_11, good_fit_p0_10 = False, False
+        try:
+            popt_p0_11, pcov = curve_fit(lambda x, a, b: expfunc(x, a, b, time_thresh), xvalues, yvalues, sigma=1/wvalues, p0=[1, 1], bounds=bounds)
+            perr_p0_11 = numpy.sum (numpy.sqrt(numpy.diag(pcov)))
+            if verbose:
+                print ('+-----------------------------------------------------------')
+                print ('| p0 = [1, 1]: {0}'.format (perr_p0_11))
+            good_fit_p0_11 = True
+        except:
+            good_fit_p0_11 = False
+
+        try:
+            popt_p0_10, pcov = curve_fit(lambda x, a, b: expfunc(x, a, b, time_thresh), xvalues, yvalues, sigma=1/wvalues, p0=[1, 0], bounds=bounds)
+            perr_p0_10 = numpy.sum (numpy.sqrt(numpy.diag(pcov)))
+            if verbose: print ('| p0 = [1, 0]: {0}'.format (perr_p0_10))
+            good_fit_p0_10 = True
+        except:
+            good_fit_p0_10 = False
+
+        if good_fit_p0_11 and not good_fit_p0_10:
+            popt, perr = popt_p0_11, perr_p0_11
+        elif good_fit_p0_10 and not good_fit_p0_11:
+            popt, perr = popt_p0_10, perr_p0_10
+        else:
+            popt = popt_p0_11 if perr_p0_11 < perr_p0_10 else popt_p0_10
+            perr = min (perr_p0_11, perr_p0_10)
+
+        good_fit = perr < badFitPerrThresh and popt[1] > 0
 
     if not good_fit: return numpy.nan
     return popt[1]
@@ -616,7 +651,7 @@ def get_results (dataframe, readers, rad_nbins=50, rad_time_thresh=120):
                 subdf = deepcopy (dataframe)
                 subdf_column_name = 'Interarrival Time (minutes)'
                 time_thresh = numpy.inf
-                nbins = 100
+                nbins = 50
             else:
 
                 ## Get this radiologist data
@@ -663,26 +698,30 @@ def report_results (resultDataFrame):
 
     text = ''
 
-    subdf = resultDataFrame[resultDataFrame['index']=='interarrival'].dropna (axis=1, how='all')
+    subdf = resultDataFrame[resultDataFrame['index']=='interarrival']
     subdf = subdf.loc[:, [col for col in subdf if 'rate' in col]]
     text += '+----------------------------------------------------------------------------\n'
     text += '| Average interarrival time:\n'
     for col in subdf:
         numberCol = col.replace ('rate', 'number')
         item = ' overall average time' if col == 'rate' else col.replace ('rate_', ' ').replace ('_', ' ')
-        text += '|   * {0:42} ({1:5}): {2:.2f} min\n'.format (item, resultDataFrame[numberCol][0], 1/subdf[col].values[0])
+        value = 'nan' if not numpy.isfinite (subdf[col].values[0]) else round (1/subdf[col].values[0], 2)
+        unit = '' if not numpy.isfinite (subdf[col].values[0]) else 'min'
+        text += '|   * {0:42} ({1:5}): {2} {3}\n'.format (item, resultDataFrame[numberCol][0], value, unit)
     text += '\n'
 
     for radType in ['Staff Radiologist', 'Resident Radiologist']:
-        subdf = resultDataFrame[resultDataFrame['userRole']==radType].dropna (axis=1, how='all')
+        subdf = resultDataFrame[resultDataFrame['userRole']==radType]
         subdf = subdf.loc[:, [col for col in subdf if 'rate' in col]]
 
         text += '+----------------------------------------------------------------------------\n'
         text += '| Average service time by {0}:\n'.format (radType)
 
         for col in subdf:
+            value = 'nan' if not numpy.isfinite (numpy.mean (subdf[col])) else round (1/numpy.mean (subdf[col]), 2)
+            unit = '' if not numpy.isfinite (numpy.mean (subdf[col])) else 'min'
             item = ' overall average time' if col == 'rate' else col.replace ('rate_', ' ').replace ('_', ' ')
-            text += '|   * {0:42}: {1:.2f} min\n'.format (item, 1/numpy.mean (subdf[col]))
+            text += '|   * {0:42}: {1} {2}\n'.format (item, value, unit)
 
         text += '\n'
     
@@ -937,7 +976,7 @@ def update_histo(nbins, selected_column, selected_reader, interopen_thresh, yaxi
 
     ## Set default values if not provided
     if selected_column is None: selected_column = 'Patient Status'
-    if nbins is None: nbins = 20 if selected_column == 'Interopen Time (minutes)' else 100
+    if nbins is None: nbins = 20 if selected_column == 'Interopen Time (minutes)' else 50
     time_thresh = numpy.inf
 
     ## If selected group by truth, slice it
@@ -1005,9 +1044,8 @@ def update_histo(nbins, selected_column, selected_reader, interopen_thresh, yaxi
     prevent_initial_call = True,
 )
 def dl_un_csv(n_clicks):
-    while n_clicks == 1:
-        results = get_results (df, readers, rad_nbins=20, rad_time_thresh=120)
-        return dcc.send_data_frame(results.to_csv, filename=f'results.csv',sep=',',header=True,index=False,encoding='utf-8')
+    results = get_results (df, readers, rad_nbins=20, rad_time_thresh=120)
+    return dcc.send_data_frame(results.to_csv, filename=f'results.csv',sep=',',header=True,index=False,encoding='utf-8')
 
 
 if __name__ == '__main__':
