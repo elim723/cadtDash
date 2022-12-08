@@ -47,15 +47,22 @@
 ###############################
 ## Import libraries
 ###############################
+from http.client import REQUEST_HEADER_FIELDS_TOO_LARGE
 from dash import Dash, dcc, html, Input, Output
 import dash_bootstrap_components as dbc
 import plotly.express as px
 import plotly.graph_objs as go
-import plotly.io as pio
 
-import pandas, numpy
+import pandas, numpy, namegenerator
 from pandas.tseries.holiday import USFederalHolidayCalendar
+import statsmodels.api as sm
+from scipy.optimize import curve_fit
 from copy import deepcopy
+
+import warnings
+warnings.filterwarnings('ignore')
+
+verbose = True
 
 ###############################
 ## Keyword dictionaries
@@ -63,6 +70,8 @@ from copy import deepcopy
 BodyPartKeywords = {'chest':['chest'],
                     'abdomen':['abd', 'abdomen'],
                     'pelvis':['pelvis']}
+
+badFitThresh = 8
 
 ###############################
 ## Data constants
@@ -90,9 +99,10 @@ AiDocColumns = ['Creation Date', 'Creation Time', 'Accession Number', 'Positive/
 PACSColumns = ['ACC', 'procedure', 'userfullname', 'UserRole', 'notetimestamp']
 
 ## Dropdown columns
-dropdownColumns = mPowerColumnDict['continuous'] + mPowerColumnDict['date'] + \
-                  mPowerColumnDict['category'] + ['AI Result', 'userfullname', 'UserRole'] + \
-                  ['Rad Open Date', 'Rad Read Duration (minutes)', 'Interarrival Time (minutes)']
+dropdownColumns = mPowerColumnDict['date'] + \
+                  mPowerColumnDict['category'] + ['AI Result', 'Decoded Radiologists', 'UserRole'] + \
+                  ['Rad Open Date', 'Interopen Time (minutes)', 'Interarrival Time (minutes)']
+dropdownColumns.remove ('Accession Number')
 dateColumns = [col for col in dropdownColumns if 'Date' in col]
 continuousColumns = [col for col in dropdownColumns if '(minutes)' in col]
 categoryColumns = [col for col in dropdownColumns if not '(minutes)' in col and not 'Date' in col]
@@ -110,6 +120,26 @@ interarrivalTimeGapThresh = 30*24*60
 ## Dataframes
 ###############################
 get_primaryAna = lambda array: numpy.nan if len (array)==0 else array[0]
+generate_random_names = lambda unique_name_list: {name:namegenerator.gen() for name in unique_name_list}
+
+def expfunc(x, a, b, c):
+    # a = amplitude, b = rate, c = cut
+    return a * numpy.exp(-b*x) / (1 - numpy.exp (-b*c))
+
+def get_histo (values, nbins, time_thresh):
+
+    hist, edges = numpy.histogram (values[values < time_thresh], bins=nbins)
+
+    xvalues = edges[:-1]
+    yvalues = hist
+
+    wvalues = numpy.sqrt (hist)
+    wvalues[numpy.where (wvalues==0)] = 1e-20
+
+    is_valid = numpy.logical_and (numpy.logical_and (numpy.isfinite (xvalues), numpy.isfinite(yvalues)), numpy.isfinite(wvalues))
+    is_valid = numpy.logical_and (is_valid, yvalues > 5)
+
+    return xvalues[is_valid], yvalues[is_valid], wvalues[is_valid]
 
 def random_with_N_digits(n):
     range_start = 10**(n-1)
@@ -233,9 +263,7 @@ def get_dataframe ():
     merged = merged.sort_values (by='Exam Completed Date')
 
     ## Calculate time differences
-    #  1. Radiologist reading time
-    merged['Rad Read Duration (minutes)'] = (merged['Report Finalized Date'] - merged['Rad Open Date']).dt.total_seconds()/60
-    #  2. Interarrival time
+    #  1. Interarrival time
     interarrivalTime = (merged['Exam Completed Date'].values[1:] - merged['Exam Completed Date'].values[:-1])/1e9/60
     merged = merged.iloc[1:]
     merged['Interarrival Time (minutes)'] = interarrivalTime.astype (float)
@@ -248,40 +276,94 @@ def get_dataframe ():
     #  1. Exam completed within business hours?
     merged['Within Business Hours'] = [is_within_business_hours (row) for _, row in merged.iterrows()]
     #  2. Exam being non-emergency class? 
-    merged['Is CADt Non-Emergency Class'] = merged['Patient Status'].isin (['Inpatient', 'Outpatient'])
+    #merged['Is CADt Non-Emergency Class'] = merged['Patient Status'].isin (['Inpatient', 'Outpatient'])
     #  3. Patient truly diseased / non-diseased with PE?
     merged['Rad Decision'], Diseased_PE = numpy.array ([get_truth (row) for _, row in merged.iterrows()]).T
     merged['Diseased PE'] = Diseased_PE == 'True'
     #  4. Rename AI result column
     merged = merged.rename (columns={'Positive/Negative':'AI Result'})
 
-    return merged
+    ## Get a list of available readers' names
+    radiologist_names = list (merged['userfullname'].value_counts().index)
+    nameMap = generate_random_names (radiologist_names)
+    merged['Decoded Radiologists'] = [nameMap[name] for name in merged['userfullname'].values]
+    readers = list (merged['Decoded Radiologists'].value_counts().index)
 
-df = get_dataframe()
+    return merged, readers
+
+df, readers = get_dataframe()
 
 ###############################
 ## Dash app functions
 ###############################
-def generate_figure (dataframe, selected_column, nbins, yaxis_type, date_by_type):
+def generate_figure (dataframe, selected_column, nbins, yaxis_type, date_by_type, time_thresh):
+
+    fitTable = None
 
     ## If no valid entries, return a histogram which will not be displayed anyways
     series = dataframe[selected_column]
+
     if len (series[~series.isna()]) == 0:
-        return px.histogram(df, x=selected_column) 
+        if selected_column == 'Interopen Time (minutes)': 
+            selected_column = 'Interarrival Time (minutes)'
+        return px.histogram(df, x=selected_column), None
 
     if selected_column in categoryColumns:
 
         category_orders = None
-        if selected_column == 'userfullname':
-            category_orders = dict (userfullname=list (dataframe['userfullname'].value_counts().index))
+        if selected_column == 'Decoded Radiologists':
+            category_orders = dict (DecodedRadiologists=list (dataframe['Decoded Radiologists'].value_counts().index))
+            category_orders['Decoded Radiologists'] = category_orders['DecodedRadiologists']
         elif selected_column == 'UserRole':
             category_orders = dict (UserRole=list (dataframe['UserRole'].value_counts().index))
 
         fig = px.histogram(dataframe, x=selected_column, category_orders=category_orders)
 
     elif selected_column in continuousColumns:
+
         fig = px.histogram(dataframe, x=selected_column, nbins=nbins)
 
+        if selected_column in ['Interarrival Time (minutes)', 'Interopen Time (minutes)']:
+
+            # perform fit in linear-y scale
+            xvalues, yvalues, wvalues = get_histo (dataframe[selected_column], nbins, time_thresh)
+            
+            popt = None
+            good_fit = False
+            bounds = [[-numpy.inf, 0], [numpy.inf, numpy.inf]]
+            try:
+                popt, pcov = curve_fit(lambda x, a, b: expfunc(x, a, b, time_thresh), xvalues, yvalues, sigma=1/wvalues, p0=[1, 1], bounds=bounds)
+                perr = numpy.sqrt(numpy.diag(pcov))
+                good_fit = True
+                if verbose:
+                    print ('+-----------------------------------------------------------')
+                    print ('| p0 = [1, 1]: {0}'.format (perr))
+                if not numpy.isfinite (perr).any() or  (perr > badFitThresh).any():
+                    good_fit = False
+                    popt, pcov = curve_fit(lambda x, a, b: expfunc(x, a, b, time_thresh), xvalues, yvalues, sigma=1/wvalues, p0=[1, 0], bounds=bounds)
+                    perr = numpy.sqrt(numpy.diag(pcov))
+                    good_fit = True
+                    if not numpy.isfinite (perr).any() or  (perr > badFitThresh).any(): good_fit = False
+                    if verbose: print ('p0 = [1, 0]: {0}'.format (perr))
+            except:
+                good_fit = False
+
+            if good_fit and popt[1] < 0: good_fit = False
+
+            if good_fit:
+                xs = numpy.linspace(0, xvalues[-1], 1000)
+                ys = expfunc(xs, popt[0], popt[1], time_thresh)
+
+                fig = px.line (x=xs, y=ys,color_discrete_sequence=['#1f77b4'])
+                error_y = go.bar.ErrorY (array=wvalues)
+                fig.add_bar (x=xvalues, y=yvalues, error_y=error_y)
+
+            else:
+                error_y = go.bar.ErrorY (array=wvalues)
+                fig = px.bar (x=xvalues, y=yvalues, error_y=wvalues)
+
+            fitTable = None if popt is None else createFitTable (popt, perr, isArrival=selected_column=='Interarrival Time (minutes)')
+        
     else: ## time-series
 
         timeFormat = '%Y' if date_by_type == 'Year' else \
@@ -311,9 +393,28 @@ def generate_figure (dataframe, selected_column, nbins, yaxis_type, date_by_type
                       plot_bgcolor='rgba(0, 0, 0, 0)',
                       paper_bgcolor='rgba(0, 0, 0, 0)',
                       font_color = 'lightgray',
-                      font_family = 'sans-serif')
+                      font_family = 'sans-serif',
+                      font=dict(size=18))
 
-    return fig    
+    return fig, fitTable
+
+def createFitTable (popt, perr, isArrival=False):
+
+    rateText = 'arrival rate' if isArrival else 'service rate'
+    averageTimeText = 'interarrival time' if isArrival else 'service time'
+
+    row1 = html.Tr([html.Td("Bestfit {0} [1/min]: ".format (rateText)), html.Td(round (popt[1], 5))])
+    row2 = html.Tr([html.Td("Average {0} [min]:".format (averageTimeText)), html.Td(round (1/popt[1], 2))])
+
+    table_body = [html.Tbody([row1, row2])]
+
+    return dbc.Table(table_body,
+                      class_name='column',
+                      bordered=True,
+                      color='dark',
+                      hover=True,
+                      responsive=True,
+                      striped=True)
 
 def generate_table(dataframe, selected_column):
 
@@ -345,7 +446,8 @@ def generate_table(dataframe, selected_column):
 
         stats = series.describe()
         # 3. mean value
-        meanValue = round (stats.loc['mean'], 4)
+        meanValue = stats.loc['mean']
+        meanValue = round (meanValue, 4)
         row3 = html.Tr([html.Td("Mean value"), html.Td(meanValue)])
         # 4. range 
         arange = '({0:.2f}, {1:.2f})'.format (stats.loc['min'], stats.loc['max'])
@@ -367,13 +469,15 @@ def generate_table(dataframe, selected_column):
                       responsive=True,
                       striped=True)
 
-def define_style (dataframe, selected_column):
+def define_style (dataframe, selected_column, fitTable):
 
     ids = ['nbins', 'nbins-text', 'graphic-div', 'yaxis-type', 'yaxis-scale-p',
            'graphic-noValid-div', 'date-by-p', 'date-by-type', 'group-by-truth',
            'group-by-truth-p', 'group-by-AIresult', 'group-by-AIresult-p',
            'group-by-afterAI', 'group-by-afterAI-p', 'group-by-businessHours',
-           'group-by-businessHours-p', 'group-by-cadtClass', 'group-by-cadtClass-p']
+           'group-by-businessHours-p', 'group-by-readers', 'group-by-readers-p',
+           'interopen-thresh', 'interopen-thresh-p', 'nbins-option',
+           'fit-table-container', 'fit-table-container-bad-fit-p']
     styles = {anId: {'display': 'none'} for anId in ids}
 
     ## Make sure there are valid entries for the selected column
@@ -387,8 +491,9 @@ def define_style (dataframe, selected_column):
 
         ## Show bin input only if continuous values
         if selected_column in continuousColumns:
-            styles['nbins'] = {'display': 'inline','width':150, 'height':20} 
+            styles['nbins'] = {'display': 'inline','width':150, 'height':35} 
             styles['nbins-text'] = {'display': 'inline-block','margin-right':20}
+            styles['nbins-option'] = {'display': 'inline-block', 'margin-right':30, 'width': 200, 'margin-top':10, 'verticalAlign': 'top'}
 
         ## Show date options only if datetime values
         if selected_column in dateColumns:
@@ -407,8 +512,16 @@ def define_style (dataframe, selected_column):
         styles['group-by-businessHours-p'] = {'display':'inline-block','margin-right':20}
         styles['group-by-businessHours'] = {'display': 'block'}           
 
-        styles['group-by-cadtClass-p'] = {'display':'inline-block','margin-right':20}
-        styles['group-by-cadtClass'] = {'display': 'block'} 
+        if selected_column == 'Interopen Time (minutes)':
+            styles['group-by-readers-p'] = {'display':'inline-block','margin-right':20}
+            styles['group-by-readers'] = {'display': 'block'} 
+            styles['interopen-thresh-p'] = {'display':'inline-block','margin-right':20}
+            styles['interopen-thresh'] = {'display': 'block', 'height':35}
+
+        if fitTable is not None:
+            styles['fit-table-container'] = {'display':'inline-block', 'width':600}
+        elif selected_column in ['Interopen Time (minutes)', 'Interarrival Time (minutes)']:
+            styles['fit-table-container-bad-fit-p']  = {'display':'inline-block', "font-weight": "bold", 'fontSize':14}
 
     else:
         ## Show no-valid message
@@ -416,13 +529,172 @@ def define_style (dataframe, selected_column):
 
     return styles
 
+def perform_fit (values, time_thresh=numpy.inf, nbins=50):
+
+    # perform fit in linear-y scale
+    xvalues, yvalues, wvalues = get_histo (values, nbins, time_thresh)
+    
+    popt = None
+    good_fit = False
+    bounds = [[-numpy.inf, 0], [numpy.inf, numpy.inf]]
+    try:
+        popt, pcov = curve_fit(lambda x, a, b: expfunc(x, a, b, time_thresh), xvalues, yvalues, sigma=1/wvalues, p0=[1, 1], bounds=bounds)
+        perr = numpy.sqrt(numpy.diag(pcov))
+        good_fit = True
+        if not numpy.isfinite (perr).any() or  (perr > badFitThresh).any():
+            good_fit = False
+            popt, pcov = curve_fit(lambda x, a, b: expfunc(x, a, b, time_thresh), xvalues, yvalues, sigma=1/wvalues, p0=[1, 0], bounds=bounds)
+            perr = numpy.sqrt(numpy.diag(pcov))
+            good_fit = True
+            if not numpy.isfinite (perr).any() or  (perr > badFitThresh).any(): good_fit = False
+    except:
+        good_fit = False
+
+    if good_fit and popt[1] < 0: good_fit = False
+
+    if not good_fit: return numpy.nan
+    return popt[1]
+
+def get_results (dataframe, readers, rad_nbins=50, rad_time_thresh=120):
+
+    columns = ['index', 'userRole',
+               'rate', 'rate_withinHour', 'rate_withinHour_diseased',
+               'rate_withinHour_diseased_beforeAI', 'rate_withinHour_diseased_afterAI',
+               'rate_withinHour_diseased_afterAI_AIpos', 'rate_withinHour_diseased_afterAI_AIneg',
+               'rate_withinHour_nonDiseased', 'rate_withinHour_nonDiseased_beforeAI',
+               'rate_withinHour_nonDiseased_afterAI', 'rate_withinHour_nonDiseased_afterAI_AIpos',
+               'rate_withinHour_nonDiseased_afterAI_AIneg', 'rate_outsideHour', 'rate_outsideHour_diseased',
+               'rate_outsideHour_diseased_beforeAI', 'rate_outsideHour_diseased_afterAI',
+               'rate_outsideHour_diseased_afterAI_AIpos', 'rate_outsideHour_diseased_afterAI_AIneg',
+               'rate_outsideHour_nonDiseased', 'rate_outsideHour_nonDiseased_beforeAI',
+               'rate_outsideHour_nonDiseased_afterAI', 'rate_outsideHour_nonDiseased_afterAI_AIpos',
+               'rate_outsideHour_nonDiseased_afterAI_AIneg',
+               'rate_diseased', 'rate_diseased_beforeAI', 'rate_diseased_afterAI',
+               'rate_diseased_afterAI_AIpos', 'rate_diseased_afterAI_AIneg',
+               'rate_nonDiseased', 'rate_nonDiseased_beforeAI',
+               'rate_nonDiseased_afterAI', 'rate_nonDiseased_afterAI_AIpos',
+               'rate_nonDiseased_afterAI_AIneg', 
+               'rate_beforeAI', 'rate_afterAI', 'rate_afterAI_AIpos', 'rate_afterAI_AIneg',
+               'number', 'number_withinHour', 'number_withinHour_diseased',
+               'number_withinHour_diseased_beforeAI', 'number_withinHour_diseased_afterAI',
+               'number_withinHour_diseased_afterAI_AIpos', 'number_withinHour_diseased_afterAI_AIneg',
+               'number_withinHour_nonDiseased', 'number_withinHour_nonDiseased_beforeAI',
+               'number_withinHour_nonDiseased_afterAI', 'number_withinHour_nonDiseased_afterAI_AIpos',
+               'number_withinHour_nonDiseased_afterAI_AIneg', 'number_outsideHour', 'number_outsideHour_diseased',
+               'number_outsideHour_diseased_beforeAI', 'number_outsideHour_diseased_afterAI',
+               'number_outsideHour_diseased_afterAI_AIpos', 'number_outsideHour_diseased_afterAI_AIneg',
+               'number_outsideHour_nonDiseased', 'number_outsideHour_nonDiseased_beforeAI',
+               'number_outsideHour_nonDiseased_afterAI', 'number_outsideHour_nonDiseased_afterAI_AIpos',
+               'number_outsideHour_nonDiseased_afterAI_AIneg',
+               'number_diseased', 'number_diseased_beforeAI', 'number_diseased_afterAI',
+               'number_diseased_afterAI_AIpos', 'number_diseased_afterAI_AIneg',
+               'number_nonDiseased', 'number_nonDiseased_beforeAI',
+               'number_nonDiseased_afterAI', 'number_nonDiseased_afterAI_AIpos',
+               'number_nonDiseased_afterAI_AIneg', 
+               'number_beforeAI', 'number_afterAI', 'number_afterAI_AIpos', 'number_afterAI_AIneg']
+
+    resultsDict = {col:[] for col in columns}
+
+    rows = ['interarrival'] + readers
+
+    for row in rows:
+
+        for col in columns:
+
+            if col == 'index':
+                resultsDict['index'].append (row)
+                continue
+
+            ## User role
+            if col == 'userRole':
+                userRole = numpy.nan if row == 'interarrival' else dataframe[dataframe['Decoded Radiologists'] == row]['UserRole'].values[0]
+                resultsDict['userRole'].append (userRole)
+                continue
+
+            ## Calculate rate  / number
+            if row == 'interarrival':
+                subdf = deepcopy (dataframe)
+                subdf_column_name = 'Interarrival Time (minutes)'
+                time_thresh = numpy.inf
+                nbins = 100
+            else:
+
+                ## Get this radiologist data
+                subdf = dataframe.groupby('Decoded Radiologists').get_group (row)
+                subdf = subdf.sort_values (by='Rad Open Date')
+                interopen = (subdf['Rad Open Date'].values[1:] - subdf['Rad Open Date'].values[:-1])/1e9/60
+                subdf = subdf.iloc[1:]
+                subdf['Interopen Time (minutes)'] = interopen.astype (float)
+                subdf = subdf[subdf['Interopen Time (minutes)'] < rad_time_thresh]
+
+                subdf_column_name = 'Interopen Time (minutes)'
+                time_thresh = rad_time_thresh
+                nbins = rad_nbins
+
+            if '_withinHour' in col:
+                subdf = subdf[subdf['Within Business Hours']]
+            elif '_outsideHour' in col:
+                subdf = subdf[~subdf['Within Business Hours']]   
+
+            if '_diseased' in col:
+                subdf = subdf[subdf['Diseased PE']]
+            elif '_nonDiseased' in col:
+                subdf = subdf[~subdf['Diseased PE']]
+
+            if '_beforeAI' in col:
+                subdf = subdf[subdf['Exam Completed Date'] < AIDoc_start_date]
+            elif '_afterAI' in col:
+                subdf = subdf[subdf['Exam Completed Date'] >= AIDoc_start_date] 
+
+            if '_AIpos' in col:
+                subdf = subdf[subdf['AI Result'] == 'P']
+            elif '_AIneg' in col:
+                subdf = subdf[subdf['AI Result'] == 'N']
+
+            if 'rate' in col:
+                rate = perform_fit (subdf[subdf_column_name].values, time_thresh=time_thresh, nbins=nbins)
+                resultsDict[col].append (rate)
+            else: ## Number
+                resultsDict[col].append (len (subdf))
+
+    return pandas.DataFrame.from_dict (resultsDict)
+
+def report_results (resultDataFrame):
+
+    text = ''
+
+    subdf = resultDataFrame[resultDataFrame['index']=='interarrival'].dropna (axis=1, how='all')
+    subdf = subdf.loc[:, [col for col in subdf if 'rate' in col]]
+    text += '+----------------------------------------------------------------------------\n'
+    text += '| Average interarrival time:\n'
+    for col in subdf:
+        numberCol = col.replace ('rate', 'number')
+        item = ' overall average time' if col == 'rate' else col.replace ('rate_', ' ').replace ('_', ' ')
+        text += '|   * {0:42} ({1:5}): {2:.2f} min\n'.format (item, resultDataFrame[numberCol][0], 1/subdf[col].values[0])
+    text += '\n'
+
+    for radType in ['Staff Radiologist', 'Resident Radiologist']:
+        subdf = resultDataFrame[resultDataFrame['userRole']==radType].dropna (axis=1, how='all')
+        subdf = subdf.loc[:, [col for col in subdf if 'rate' in col]]
+
+        text += '+----------------------------------------------------------------------------\n'
+        text += '| Average service time by {0}:\n'.format (radType)
+
+        for col in subdf:
+            item = ' overall average time' if col == 'rate' else col.replace ('rate_', ' ').replace ('_', ' ')
+            text += '|   * {0:42}: {1:.2f} min\n'.format (item, 1/numpy.mean (subdf[col]))
+
+        text += '\n'
+    
+    return text
+
 ###############################
 ## Dash app
 ###############################
 app = Dash(__name__, external_stylesheets=[dbc.themes.SLATE])
 
 app.layout = html.Div (children=[
-    
+
     html.Div(
         html.H2 (children='Dashboard for FDA-Chicago CADt project')
     ),
@@ -452,6 +724,13 @@ app.layout = html.Div (children=[
 
     html.Br(),
 
+    html.Div(children=[
+        html.Button('Export data',id="download-csv"),
+        dcc.Download(id='first_output')
+    ]),
+
+    html.Br(),
+
     html.Div(className='displayOptions', children=[
 
         html.Div (children=[
@@ -467,7 +746,7 @@ app.layout = html.Div (children=[
                     inputStyle={"margin-right": "10px", "margin-top": "5px"}
                 )
             ],style={'display': 'block'})
-        ], style={'display': 'inline-block', 'margin-right':30}),
+        ], style={'display': 'inline-block', 'margin-right':30, 'margin-top':10, 'verticalAlign': 'top'}),
 
         html.Div (children=[
             html.Div([
@@ -483,7 +762,7 @@ app.layout = html.Div (children=[
                     style={'display':'none'}
                 )
             ],style={'display': 'block'})
-        ], style={'display': 'inline-block', 'margin-right':30}),
+        ], style={'display': 'inline-block', 'margin-right':30, 'margin-top':10, 'verticalAlign': 'top'}),
 
         html.Div (children=[
             html.Div([
@@ -499,23 +778,7 @@ app.layout = html.Div (children=[
                     style={'display':'none'}
                 )
             ],style={'display': 'block'})
-        ], style={'display': 'inline-block', 'margin-right':30}),
-
-        html.Div (children=[
-            html.Div([
-                html.P('AI call subgroups:', id='group-by-AIresult-p',
-                    style={'display':'none'}),
-                dcc.RadioItems(
-                    ['All', 'AI Positive', 'AI Negative'],
-                    'All',
-                    id='group-by-AIresult',
-                    inline=False,
-                    labelStyle={'display': 'block'},
-                    inputStyle={"margin-right": "15px", "margin-top": "5px"},
-                    style={'display':'none'}
-                )
-            ],style={'display': 'block'})
-        ], style={'display': 'inline-block', 'margin-right':30}),
+        ], style={'display': 'inline-block', 'margin-right':30, 'margin-top':10, 'verticalAlign': 'top'}),
 
         html.Div (children=[
             html.Div([
@@ -531,30 +794,30 @@ app.layout = html.Div (children=[
                     style={'display':'none'}
                 )
             ],style={'display': 'block'})
-        ], style={'display': 'inline-block', 'margin-right':30}),
+        ], style={'display': 'inline-block', 'margin-right':30, 'margin-top':10, 'verticalAlign': 'top'}), 
 
         html.Div (children=[
             html.Div([
-                html.P('CADt nonEmergency subgroups:', id='group-by-cadtClass-p',
+                html.P('AI call subgroups:', id='group-by-AIresult-p',
                     style={'display':'none'}),
                 dcc.RadioItems(
-                    ['All', 'Emergency', 'Non-Emergency'],
+                    ['All', 'AI Positive', 'AI Negative'],
                     'All',
-                    id='group-by-cadtClass',
+                    id='group-by-AIresult',
                     inline=False,
                     labelStyle={'display': 'block'},
                     inputStyle={"margin-right": "15px", "margin-top": "5px"},
                     style={'display':'none'}
                 )
             ],style={'display': 'block'})
-        ], style={'display': 'inline-block', 'margin-right':30}),        
+        ], style={'display': 'inline-block', 'margin-right':30, 'margin-top':10, 'verticalAlign': 'top'}),
 
-        html.Div(children=[
+        html.Div(id='nbins-option', children=[
             html.P('Enter Number of bins:', id='nbins-text',
                 style={'display':'none'}),
             dcc.Input(id='nbins', placeholder='number of bins', type='number',
                     style={'display':'none'})
-        ], style={'display': 'inline-block', 'width': 200}),
+        ], style={'display': 'none'}),
 
         html.Div (children=[
             html.Div([
@@ -570,8 +833,50 @@ app.layout = html.Div (children=[
                     style={'display':'none'}
                 )
             ],style={'display': 'block'})
-        ], style={'display': 'inline-block', 'margin-right':30})
+        ], style={'display': 'inline-block', 'margin-right':30, 'margin-top':10, 'verticalAlign': 'top'})
 
+    ]),
+
+    html.Br(),
+    html.Br(),
+
+    html.Div(className='displayOptions', children=[
+
+        html.Div (children=[
+            html.Div([
+                html.P('By radiologists:', id='group-by-readers-p',
+                    style={'display':'none'}),
+                dcc.Dropdown(
+                    readers,
+                    readers[0],
+                    id='group-by-readers',
+                    style={'display':'none', "margin-right": "60px", "margin-top": "5px"}
+                )
+            ],style={'display': 'block'})
+        ], style={'display': 'inline-block', 'margin-right':30, 'margin-top':10, 'width':250, 'verticalAlign': 'top'}),
+
+        html.Div (children=[
+            html.Div([
+                html.P('Interopen Time threshold (minutes):', id='interopen-thresh-p',
+                    style={'display':'none'}),
+                dcc.Input(id='interopen-thresh', placeholder='threshold', type='number',
+                    style={'display':'none'})
+            ],style={'display': 'block'})
+        ], style={'display': 'inline-block', 'margin-right':30, 'margin-top':10, 'width':350, 'verticalAlign': 'top'})  
+
+    ]),
+
+    html.Br(),
+    html.Br(),
+    
+    html.Div(
+            id='fit-table-container',  className='tableDiv',
+            style={'display': 'none'}
+    ),
+
+    html.Div ([
+        html.P('Fit failed', id='fit-table-container-bad-fit-p',
+                style={'display':'none'}),
     ]),
 
     html.Br(),
@@ -592,8 +897,10 @@ app.layout = html.Div (children=[
     Output('graphic', 'figure'),
     Output('columnName-header', 'children'),
     Output('table-container','children'),
+    Output('fit-table-container','children'),    
     Output('nbins', 'style'),
     Output('nbins-text', 'style'),
+    Output('nbins-option', 'style'),
     Output('graphic-div', 'style'),  
     Output('yaxis-type', 'style'),  
     Output('yaxis-scale-p', 'style'),
@@ -607,28 +914,45 @@ app.layout = html.Div (children=[
     Output('group-by-afterAI-p', 'style'),    
     Output('group-by-businessHours', 'style'),
     Output('group-by-businessHours-p', 'style'),
-    Output('group-by-cadtClass', 'style'),   
-    Output('group-by-cadtClass-p', 'style'),  
-    Output('graphic-noValid-div', 'style'),  
+    Output('group-by-readers', 'style'),   
+    Output('group-by-readers-p', 'style'), 
+    Output('interopen-thresh', 'style'),
+    Output('interopen-thresh-p', 'style'),       
+    Output('graphic-noValid-div', 'style'),    
+    Output('fit-table-container','style'),
+    Output('fit-table-container-bad-fit-p', 'style'),
     Input('nbins', 'value'),
     Input('xaxis-column', 'value'),
+    Input('group-by-readers', 'value'),
+    Input('interopen-thresh', 'value'), 
     Input('yaxis-type', 'value'),
     Input('date-by-type', 'value'),
     Input('group-by-truth', 'value'),
     Input('group-by-AIresult', 'value'),
     Input('group-by-afterAI', 'value'),
-    Input('group-by-businessHours', 'value'),
-    Input('group-by-cadtClass', 'value')
+    Input('group-by-businessHours', 'value')
     )
-def update_histo(nbins, selected_column, yaxis_type, date_by_type, group_by_truth,
-                 group_by_AIresult, group_by_afterAI, group_by_busniessHours, group_by_CADtClass):
+def update_histo(nbins, selected_column, selected_reader, interopen_thresh, yaxis_type, date_by_type, group_by_truth,
+                 group_by_AIresult, group_by_afterAI, group_by_busniessHours): #, group_by_CADtClass):
 
     ## Set default values if not provided
     if selected_column is None: selected_column = 'Patient Status'
-    if nbins is None: nbins = 10
+    if nbins is None: nbins = 20 if selected_column == 'Interopen Time (minutes)' else 100
+    time_thresh = numpy.inf
 
     ## If selected group by truth, slice it
     dataframe = deepcopy (df)
+    if selected_column == 'Interopen Time (minutes)':
+        if selected_reader is None: selected_reader = readers[0]
+        dataframe = dataframe.groupby('Decoded Radiologists').get_group (selected_reader)
+        dataframe = dataframe.sort_values (by='Rad Open Date')
+        interopen = (dataframe['Rad Open Date'].values[1:] - dataframe['Rad Open Date'].values[:-1])/1e9/60
+        dataframe = dataframe.iloc[1:]
+        dataframe['Interopen Time (minutes)'] = interopen.astype (float)
+        if interopen_thresh is not None:
+            dataframe = dataframe[dataframe['Interopen Time (minutes)'] < interopen_thresh]
+            time_thresh = interopen_thresh
+
     if group_by_truth == 'Diseased':
         dataframe = dataframe[dataframe['Diseased PE']]
     elif group_by_truth == 'Non-Diseased':
@@ -655,30 +979,38 @@ def update_histo(nbins, selected_column, yaxis_type, date_by_type, group_by_trut
     elif group_by_busniessHours == 'Outside hours':
         dataframe = dataframe[~dataframe['Within Business Hours']]
 
-    ## If selected group by cadtClass, slice it
-    if group_by_CADtClass == 'Non-Emergency':
-        dataframe = dataframe[dataframe['Is CADt Non-Emergency Class']]
-    elif group_by_CADtClass == 'Emergency':
-        dataframe = dataframe[~dataframe['Is CADt Non-Emergency Class']]
-
     ## Update figure
-    fig = generate_figure (dataframe, selected_column, nbins, yaxis_type, date_by_type)
+    fig, fitTable = generate_figure (dataframe, selected_column, nbins, yaxis_type, date_by_type, time_thresh=time_thresh)
 
     ## Update display
-    styles = define_style (dataframe, selected_column)
+    styles = define_style (dataframe, selected_column, fitTable)
 
     ## Update table
     statsTable = generate_table(dataframe, selected_column)
 
-    return fig, selected_column, statsTable, styles['nbins'], styles['nbins-text'], \
+    return fig, selected_column, statsTable, fitTable, styles['nbins'], styles['nbins-text'], styles['nbins-option'], \
            styles['graphic-div'], styles['yaxis-type'], styles['yaxis-scale-p'], \
            styles['date-by-type'], styles['date-by-p'], styles['group-by-truth'], \
            styles['group-by-truth-p'], styles['group-by-AIresult'], \
            styles['group-by-AIresult-p'], styles['group-by-afterAI'], \
            styles['group-by-afterAI-p'], styles['group-by-businessHours'], \
-           styles['group-by-businessHours-p'], styles['group-by-cadtClass'], \
-           styles['group-by-cadtClass-p'], styles['graphic-noValid-div']
+           styles['group-by-businessHours-p'], styles['group-by-readers'], \
+           styles['group-by-readers-p'], styles['interopen-thresh'], \
+           styles['interopen-thresh-p'], styles['graphic-noValid-div'], \
+           styles['fit-table-container'], styles['fit-table-container-bad-fit-p']
+
+@app.callback(
+    Output("first_output","data"),
+    Input('download-csv','n_clicks'), 
+    prevent_initial_call = True,
+)
+def dl_un_csv(n_clicks):
+    while n_clicks == 1:
+        results = get_results (df, readers, rad_nbins=20, rad_time_thresh=120)
+        return dcc.send_data_frame(results.to_csv, filename=f'results.csv',sep=',',header=True,index=False,encoding='utf-8')
+
 
 if __name__ == '__main__':
+
     app.run_server(debug=True)
 
