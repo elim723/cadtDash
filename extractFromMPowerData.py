@@ -116,8 +116,8 @@ holidays = holidayCal.holidays(start='2014-01-01', end='2026-12-31').to_pydateti
 #  Threshold for interarrival time in minutes - 1 month
 interarrivalTimeGapThresh = 30*24*60
 
-binsAttempt = numpy.linspace (10, 30, 21).astype (int)
-meanServiceTimeThresh = 50 # minutes
+binsAttempt = numpy.linspace (5, 30, 21).astype (int)
+meanServiceTimeThresh = 120 # minutes
 
 ###############################
 ## Dataframes
@@ -125,81 +125,96 @@ meanServiceTimeThresh = 50 # minutes
 get_primaryAna = lambda array: numpy.nan if len (array)==0 else array[0]
 generate_random_names = lambda unique_name_list: {name:namegenerator.gen() for name in unique_name_list}
 
-def expfunc(x, a, b, c):
+def expfunc_with_amp (x, a, b, c):
     # a = amplitude, b = rate, c = cut
     return a * numpy.exp(-b*x) / (1 - numpy.exp (-b*c))
 
-def perform_fit (values, time_thresh=numpy.inf, nbins=50, verbose=False):
+def expfunc(x, b, c):
+    # b = rate, c = cut
+    return b * numpy.exp(-b*x) / (1 - numpy.exp (-b*c))
 
-    xvalues, yvalues, wvalues, has_enough = get_histo (values, nbins, time_thresh)
-    
+def perform_fit (values, time_thresh=numpy.inf, nbins=50, verbose=False, withAmp=False):
+
+    xvalues, yvalues, wvalues, norm, has_enough = get_histo (values, nbins, time_thresh)
+    yvalues = yvalues / norm
+    wvalues = wvalues / norm
+
     popt = None
     good_fit = False
-    bounds = [[-numpy.inf, 0], [numpy.inf, numpy.inf]]
 
     if has_enough:
-        popt_p0_11, popt_p0_10 = None, None
-        perr_p0_11, perr_p0_10 = None, None
-        good_fit_p0_11, good_fit_p0_10 = False, False
+        popt_p0_1, popt_p0_0 = None, None
+        perr_p0_1, perr_p0_0 = None, None
+        good_fit_p0_1, good_fit_p0_0 = False, False
         try:
-            popt_p0_11, pcov = curve_fit(lambda x, a, b: expfunc(x, a, b, time_thresh), xvalues, yvalues, sigma=1/wvalues, p0=[1, 1], bounds=bounds)
-            perr_p0_11 = numpy.sum (numpy.sqrt(numpy.diag(pcov)))
+            if withAmp:
+                popt_p0_1, pcov = curve_fit(lambda x, a, b: expfunc_with_amp(x, a, b, time_thresh),
+                                            xvalues, yvalues, sigma=1/wvalues, p0=[1, 1], bounds=[[-numpy.inf, 0], [numpy.inf, numpy.inf]])
+            else:
+                popt_p0_1, pcov = curve_fit(lambda x, b: expfunc(x, b, time_thresh),
+                                            xvalues, yvalues, sigma=1/wvalues, p0=[1], bounds=[[0], [numpy.inf]])
+            perr_p0_1 = numpy.sum (numpy.sqrt(numpy.diag(pcov)))
             if verbose:
                 print ('+-----------------------------------------------------------')
-                print ('| p0 = [1, 1]: {0}'.format (perr_p0_11))
-            good_fit_p0_11 = True
+                print ('| p0 = [1]: {0}'.format (perr_p0_1))
+            good_fit_p0_1 = True
         except:
-            good_fit_p0_11 = False
+            good_fit_p0_1 = False
 
         try:
-            popt_p0_10, pcov = curve_fit(lambda x, a, b: expfunc(x, a, b, time_thresh), xvalues, yvalues, sigma=1/wvalues, p0=[1, 0], bounds=bounds)
-            perr_p0_10 = numpy.sum (numpy.sqrt(numpy.diag(pcov)))
-            if verbose: print ('| p0 = [1, 0]: {0}'.format (perr_p0_10))
-            good_fit_p0_10 = True
+            if withAmp:
+                popt_p0_0, pcov = curve_fit(lambda x, a, b: expfunc_with_amp(x, a, b, time_thresh),
+                                            xvalues, yvalues, sigma=1/wvalues, p0=[1, 0], bounds=[[-numpy.inf, 0], [numpy.inf, numpy.inf]])
+            else:            
+                popt_p0_0, pcov = curve_fit(lambda x, b: expfunc(x, b, time_thresh),
+                                            xvalues, yvalues, sigma=1/wvalues, p0=[0], bounds=[[0], [numpy.inf]])
+            perr_p0_0 = numpy.sum (numpy.sqrt(numpy.diag(pcov)))
+            if verbose: print ('| p0 = [0]: {0}'.format (perr_p0_0))
+            good_fit_p0_0 = True
         except:
-            good_fit_p0_10 = False
+            good_fit_p0_0 = False
 
-        if good_fit_p0_11 and not good_fit_p0_10:
-            popt, perr = popt_p0_11, perr_p0_11
-        elif good_fit_p0_10 and not good_fit_p0_11:
-            popt, perr = popt_p0_10, perr_p0_10
+        if good_fit_p0_1 and not good_fit_p0_0:
+            popt, perr = popt_p0_1, perr_p0_1
+        elif good_fit_p0_0 and not good_fit_p0_1:
+            popt, perr = popt_p0_0, perr_p0_0
         else:
-            popt = popt_p0_11 if perr_p0_11 < perr_p0_10 else popt_p0_10
-            perr = min (perr_p0_11, perr_p0_10)
+            popt = popt_p0_1 if perr_p0_1 < perr_p0_0 else popt_p0_0
+            perr = min (perr_p0_1, perr_p0_0)
 
-        good_fit = perr < badFitPerrThresh and popt[1] > 0
+        good_fit = perr < badFitPerrThresh and popt[1] > 0 if withAmp else \
+                   perr < badFitPerrThresh and popt[0] > 0
 
     if verbose: 
-        text = popt[1] if good_fit else 'n/a'
+        text = popt[1] if good_fit and withAmp else popt[0] if goodfit else 'n/a'
         print ('| fit ({0}): {1}'.format (good_fit, text))
     if not good_fit: return None, None
 
     ## Calculate LLH
-    ys = expfunc(xvalues, popt[0], popt[1], time_thresh)
+    ys = expfunc_with_amp(xvalues, popt[0], popt[1], time_thresh) if withAmp else expfunc(xvalues, popt[0], time_thresh)
     llh = ((ys - yvalues)**2).sum()
 
     return popt, llh
 
 def get_histo (values, nbins, time_thresh):
 
-    ## Without threshold to get normalization value
-    hist, edges = numpy.histogram (values, bins=nbins)
-    norm = numpy.sum (hist)
-
+    ## Normalization value should be after threshold for truncated exp distribution
     hist, edges = numpy.histogram (values[values < time_thresh], bins=nbins)
+    norm = numpy.sum (hist)
 
     xvalues = edges[:-1]
     yvalues = hist 
-
+    ## weight by error bar
     wvalues = numpy.sqrt (hist) 
     wvalues[numpy.where (wvalues==0)] = 1e-20
-
+    ## select datapoints with valid datapoints
     is_valid = numpy.logical_and (numpy.logical_and (numpy.isfinite (xvalues), numpy.isfinite(yvalues)), numpy.isfinite(wvalues))
-
-    has_enough = yvalues[is_valid] > 5
+    ## select datapoints with enough number of events i.e. at least 5
+    has_enough = yvalues[is_valid] > 1
+    ## only perform fit with more than 3 valid bins
     has_enough_valid_bins = len (has_enough[has_enough]) > 3
 
-    return xvalues[is_valid], yvalues[is_valid] / norm, wvalues[is_valid] / norm, has_enough_valid_bins
+    return xvalues[is_valid], yvalues[is_valid], wvalues[is_valid], norm, has_enough_valid_bins
 
 def func (r, S, N, thresh):
     return (S/N - 1/r + thresh/(numpy.exp (r*thresh)-1))**2
@@ -214,20 +229,22 @@ def get_numerical_answer (values, thresh, method='L-BFGS-B', x0=0.000001, verbos
 
     if verbose: print ('| ana ({0}): {1}'.format (res.success, res.x[0]))
 
-    if res.success and res.x[0]<1: return res.x[0]
+    if res.success and res.x[0]<1: return res#.x[0]
     return None
 
-def get_analytical_bestfit (values, time_thresh):
+def get_analytical_bestfit (values, time_thresh, maxr=0.1, verbose=False):
 
-    anaRate = get_numerical_answer (values, time_thresh, method='L-BFGS-B', x0=0.000001)
-    if anaRate is None: anaRate = get_numerical_answer (values, time_thresh, method='L-BFGS-B', x0=0.01)
-    if anaRate is None: anaRate = get_numerical_answer (values, time_thresh, method='L-BFGS-B', x0=0.1)
-    if anaRate is None: anaRate = get_numerical_answer (values, time_thresh, method='SLSQP', x0=0.000001)
-    if anaRate is None: anaRate = get_numerical_answer (values, time_thresh, method='SLSQP', x0=0.01)
-    if anaRate is None: anaRate = get_numerical_answer (values, time_thresh, method='SLSQP', x0=0.1)
-
-    if anaRate in [1e-6, 0.01, 0.1]: return None
-    return anaRate
+    S = numpy.sum (values[values < time_thresh])
+    N = len (values[values < time_thresh])
+    r = numpy.linspace (0, maxr, 10000)
+    thresh = numpy.nan_to_num (time_thresh)
+    y = (S/N - 1/r + thresh/(numpy.exp (r*thresh)-1))**2
+    is_valid = numpy.isfinite (y)
+    ## Declare no analytic solution if less than 3 valid entries
+    if len (is_valid[is_valid]) < 3: return None
+    r, y = r[is_valid], y[is_valid]
+    y = y - min (y)
+    return r[numpy.argmin (y)]
 
 def random_with_N_digits(n):
     range_start = 10**(n-1)
@@ -381,38 +398,80 @@ def get_dataframe ():
 
     return merged, readers
 
-def get_interopenTimes (dataframe, time_thresh=120, meanservice_thresh=meanServiceTimeThresh):
+def get_interopenTimes (selected_reader_type, group_by_truth, group_by_AIresult, group_by_afterAI, group_by_busniessHours,
+                        time_thresh=120, meanservice_thresh=meanServiceTimeThresh):
 
     ## Get the list of readers in this dataframe
+    dataframe = deepcopy (df)
+
+    if selected_reader_type == 'Staff':
+        dataframe = dataframe[dataframe['UserRole'] == 'Staff Radiologist']
+    elif selected_reader_type == 'Resident':
+        dataframe = dataframe[dataframe['UserRole'] == 'Resident Radiologist']
     readers = list (dataframe['Decoded Radiologists'].value_counts().index)
 
     fitRates, anaRates = [], []
     ## Perform fit per each reader
     for reader in readers:
+
         # Calculate inter open time
         subdf = dataframe.groupby('Decoded Radiologists').get_group (reader)
         subdf = subdf.sort_values (by='Rad Open Date')
         interopen = (subdf['Rad Open Date'].values[1:] - subdf['Rad Open Date'].values[:-1])/1e9/60
         subdf = subdf.iloc[1:]
         subdf['Interopen Time (minutes)'] = interopen.astype (float)
+        subdf = subdf[subdf['Interopen Time (minutes)'] < time_thresh]
         
+        ## If selected group by truth, slice it
+        if group_by_truth == 'Diseased':
+            subdf = subdf[subdf['Diseased PE']]
+        elif group_by_truth == 'Non-Diseased':
+            subdf = subdf[~subdf['Diseased PE']]
+        if len (subdf) == 0: continue
+
+        ## If selected group by AI positive/negative, slice it
+        ## Note that by selecting AI positive/negative, it is implied that data is collected after AI use.
+        if group_by_AIresult == 'AI Positive':
+            group_by_AIresult = 'After use of AI'
+            subdf = subdf[subdf['AI Result'] == 'P']
+        elif group_by_AIresult == 'AI Negative':
+            group_by_AIresult = 'After use of AI'
+            subdf = subdf[subdf['AI Result'] == 'N']
+        if len (subdf) == 0: continue            
+
+        ## If selected group by before / after use of AI, slice it
+        if group_by_afterAI == 'Before use of AI':
+            subdf = subdf[subdf['Exam Completed Date'] < AIDoc_start_date]
+        elif group_by_afterAI == 'After use of AI':
+            subdf = subdf[subdf['Exam Completed Date'] >= AIDoc_start_date]
+        if len (subdf) == 0: continue            
+
+        ## If selected group by busniessHours, slice it
+        if group_by_busniessHours == 'Within hours':
+            subdf = subdf[subdf['Within Business Hours']]
+        elif group_by_busniessHours == 'Outside hours':
+            subdf = subdf[~subdf['Within Business Hours']]
+        if len (subdf) == 0: continue            
+
         values = subdf['Interopen Time (minutes)']
         # Method 1: perform truncated exp fit 
-        nbins = find_bestfit_bins (subdf, 'Interopen Time (minutes)', time_thresh)
-        fitRate, llh = perform_fit (values, nbins=nbins, time_thresh=time_thresh)
+        nbins = find_bestfit_bins (subdf, 'Interopen Time (minutes)', time_thresh, verbose=False, withAmp=True)
+        fitRate, llh = perform_fit (values, nbins=nbins, time_thresh=time_thresh, verbose=False, withAmp=True)
         if fitRate is not None: fitRates.append (fitRate[1])
+
         # Method 2: analytical solution
-        anaRate = get_analytical_bestfit (values, time_thresh)
-        if anaRate is not None: anaRates.append (anaRate)
+        #maxr = 0.5 if fitRate is None else fitRate[1]+0.1
+        #anaRate = get_analytical_bestfit (values, time_thresh, maxr=maxr, verbose=False)
+        #if anaRate is not None: anaRates.append (anaRate)
 
     fitMeanServiceTime = 1/numpy.array (fitRates)
     fitMeanServiceTime = fitMeanServiceTime[fitMeanServiceTime<meanservice_thresh]
-    anaMeanServiceTime = 1/numpy.array (anaRates)
-    anaMeanServiceTime = anaMeanServiceTime[anaMeanServiceTime<meanservice_thresh]
+    #anaMeanServiceTime = 1/numpy.array (anaRates)
+    #anaMeanServiceTime = anaMeanServiceTime[anaMeanServiceTime<meanservice_thresh]
 
     histdf = pandas.DataFrame(dict(
-            series=numpy.concatenate((["fitting"]*len(fitMeanServiceTime), ["analytical"]*len(anaMeanServiceTime))), 
-            data  =numpy.concatenate((fitMeanServiceTime,anaMeanServiceTime))
+            series=["Direct Fit"]*len(fitMeanServiceTime), 
+            data  =(fitMeanServiceTime)
     ))
     return histdf
 
@@ -421,13 +480,15 @@ df, readers = get_dataframe()
 ###############################
 ## Dash app functions
 ###############################
-def find_bestfit_bins (dataframe, selected_column, time_thresh, verbose=False):
+def find_bestfit_bins (dataframe, selected_column, time_thresh, verbose=False, withAmp=False):
 
     values = dataframe[selected_column]
+    binsAttempt =  numpy.linspace (10, 30, 21) if selected_column == 'Interarrival Time (minutes)' else numpy.linspace (5, 30, 26) 
+    binsAttempt = binsAttempt.astype (int)
 
     minLLH, minNbins = numpy.inf, binsAttempt[0]
     for nbins in binsAttempt:
-        bestfit, llh = perform_fit (values, nbins=nbins, time_thresh=time_thresh)
+        bestfit, llh = perform_fit (values, nbins=nbins, time_thresh=time_thresh, withAmp=withAmp)
         # If llh is not available, it is a bad fit i.e. can't be a minimum
         if llh is None: continue
         if verbose: print ('{0}: {1} ({2})'.format (nbins, llh, bestfit))
@@ -436,7 +497,8 @@ def find_bestfit_bins (dataframe, selected_column, time_thresh, verbose=False):
             minNbins = nbins
     return int (minNbins)
 
-def generate_figure (dataframe, selected_column, nbins, yaxis_type, date_by_type, time_thresh, meanservice_thresh):
+def generate_figure (dataframe, selected_column, nbins, yaxis_type,
+                     date_by_type, time_thresh, meanRadServiceTimedf=None):
 
     fitTable = None
     ## holder for minifig so dash doesn't complain
@@ -444,7 +506,6 @@ def generate_figure (dataframe, selected_column, nbins, yaxis_type, date_by_type
     
     if selected_column == 'Mean Radiologist Service Time (minutes)':
         series = None
-        if meanservice_thresh is None: meanservice_thresh = meanServiceTimeThresh
     else:
         series = dataframe[selected_column]
         ## If no valid entries, return a histogram which will not be displayed anyways
@@ -455,8 +516,7 @@ def generate_figure (dataframe, selected_column, nbins, yaxis_type, date_by_type
 
     if selected_column == 'Mean Radiologist Service Time (minutes)':
 
-        histdf = get_interopenTimes (dataframe, time_thresh=time_thresh, meanservice_thresh=meanservice_thresh)
-        fig = px.histogram(histdf, x='data', color='series', barmode='group', nbins=nbins)
+        fig = px.histogram(meanRadServiceTimedf, x='data', color='series', barmode='group', nbins=nbins)
 
     elif selected_column in categoryColumns:
 
@@ -477,56 +537,55 @@ def generate_figure (dataframe, selected_column, nbins, yaxis_type, date_by_type
 
             # Method 1: perform exp fit 
             values = dataframe[selected_column]
-            bestfit, llh = perform_fit (values, nbins=nbins, time_thresh=time_thresh)
-            good_fit = not bestfit is None
+            nbins_withAmp = find_bestfit_bins (dataframe, selected_column, time_thresh, verbose=False, withAmp=True)
+            bestfit_withAmp, llh_withAmp = perform_fit (values, nbins=nbins_withAmp, time_thresh=time_thresh, withAmp=True)
+            #nbins_withnoAmp = find_bestfit_bins (dataframe, selected_column, time_thresh, verbose=False, withAmp=False)
+            #bestfit, llh = perform_fit (values, nbins=nbins_withnoAmp, time_thresh=time_thresh, withAmp=False)
+            good_fit_withAmp = not bestfit_withAmp is None
+            #good_fit = not bestfit is None
 
-            hist, edges = numpy.histogram (values, bins=nbins)
-            norm = numpy.sum (hist)
-            hist, edges = numpy.histogram (values[values < time_thresh], bins=nbins)
+            ## Get histo with different nbins
+            xvalues_withAmp, yvalues_withAmp, wvalues_withAmp, norm_withAmp, has_enough_withAmp = get_histo (values, nbins_withAmp, time_thresh)
 
-            xvalues = edges[:-1]
-            yvalues = hist 
-            wvalues = numpy.sqrt (hist) 
-            wvalues[numpy.where (wvalues==0)] = 1e-20
-
-            is_valid = numpy.logical_and (numpy.logical_and (numpy.isfinite (xvalues), numpy.isfinite(yvalues)), numpy.isfinite(wvalues))
-            xvalues, yvalues, wvalues = xvalues[is_valid], yvalues[is_valid]/norm, wvalues[is_valid]/norm
-
-            if good_fit:
-                xs = numpy.linspace(0, xvalues[-1], 1000)
-                ys = expfunc(xs, bestfit[0], bestfit[1], time_thresh)
-
-                fig = px.line (x=xs, y=ys,color_discrete_sequence=['#1f77b4'])
-                error_y = go.bar.ErrorY (array=wvalues)
-                fig.add_bar (x=xvalues, y=yvalues, error_y=error_y)
-
-            else:
-                error_y = go.bar.ErrorY (array=wvalues)
-                fig = px.bar (x=xvalues, y=yvalues, error_y=wvalues)
-
-            # Method 2: analytical solution
-            anaRate = get_analytical_bestfit (values, time_thresh)
-
-            # Create mini figure showing the space landscape
+            # Method 2: analytical solution            
             S = numpy.sum (values[values < time_thresh])
             N = len (values[values < time_thresh])
             r = numpy.linspace (0, 0.1, 10000)
-            if good_fit: 
-                maxr = max (0.1, bestfit[1] + 0.1)
+            if good_fit_withAmp: 
+                maxr = max (max(r), bestfit_withAmp[1] + 0.1)
                 r = numpy.linspace (0, maxr, 10000)
             thresh = numpy.nan_to_num (time_thresh)
             y = (S/N - 1/r + thresh/(numpy.exp (r*thresh)-1))**2
             is_valid = numpy.isfinite (y)
             r, y = r[is_valid], y[is_valid]
             y = y - min (y)
+            anaRate = r[numpy.argmin (y)]
 
+            ## Plot
+            if good_fit_withAmp:
+                xs = numpy.linspace(0, xvalues_withAmp[-1], 1000)
+                # Line from method 1
+                #yFits = expfunc(xs, bestfit[0], time_thresh)
+                yFitWithAmps = expfunc_with_amp(xs, bestfit_withAmp[0], bestfit_withAmp[1], time_thresh)
+                yAnas = expfunc(xs, anaRate, time_thresh)
+                fig = px.bar (x=xvalues_withAmp, y=yvalues_withAmp, error_y=wvalues_withAmp)                
+                #fig.add_traces (go.Scatter (x=xs, y=yFits, mode='lines', name='Direct fit without amplitude'))
+                fig.add_traces (go.Scatter (x=xs, y=yFitWithAmps*norm_withAmp, mode='lines', name='Direct fit',
+                                            line=dict(color='lightyellow', width=4, dash='dash')))
+                fig.add_traces (go.Scatter (x=xs, y=yAnas*numpy.sum (yFitWithAmps)/numpy.sum (yAnas)*norm_withAmp,
+                                            mode='lines', name='Analytical', line=dict(color='firebrick', width=4)))
+
+            else:
+                fig = px.bar (x=xvalues_withAmp, y=yvalues_withAmp, error_y=wvalues_withAmp)       
+
+            # Create mini figure showing the space landscape
             minifig = go.Figure()
             minifig.add_hline(y=0, line_width=5, line_dash="solid", line_color="white")            
             minifig.add_trace(go.Scatter(x=r, 
                                              y=y, 
                                              mode='lines', 
-                                             line=dict(color='#1f77b4', width=3, dash='solid'),
-                                             name='likelihood space'))
+                                             line=dict(color='mediumorchid', width=3, dash='solid'),
+                                             name='Likelihood space'))
             xrange = [0, max (r)]
             yrange = [-50, 500]
             
@@ -534,17 +593,26 @@ def generate_figure (dataframe, selected_column, nbins, yaxis_type, date_by_type
                 minifig.add_trace(go.Scatter(x=[anaRate, anaRate], 
                                              y=yrange, 
                                              mode='lines', 
-                                             line=dict(color='green', width=3, dash='dash'),
-                                             name='analytical'))
+                                             line=dict(color='firebrick', width=3, dash='dash'),
+                                             name='Analytical'))
                 if anaRate > xrange[1]: xrange[1] = anaRate + 0.01
 
-            if good_fit and numpy.isfinite (bestfit[1]):
-                minifig.add_trace(go.Scatter(x=[bestfit[1],bestfit[1]], 
+            #if good_fit and numpy.isfinite (bestfit[0]):
+            #    minifig.add_trace(go.Scatter(x=[bestfit[0],bestfit[0]], 
+            #                                 y=yrange, 
+            #                                 mode='lines', 
+            #                                 line=dict(color='red', width=3, dash='dash'),
+            #                                 name='fit to truncated exp'))
+            #    if bestfit[0] > xrange[1]: xrange[1] = bestfit[0] + 0.01
+
+            if good_fit_withAmp and numpy.isfinite (bestfit_withAmp[1]):
+                minifig.add_trace(go.Scatter(x=[bestfit_withAmp[1],bestfit_withAmp[1]], 
                                              y=yrange, 
                                              mode='lines', 
-                                             line=dict(color='red', width=3, dash='dash'),
-                                             name='fit to truncated exp'))
-                if bestfit[1] > xrange[1]: xrange[1] = bestfit[1] + 0.01
+                                             line=dict(color='lightyellow', width=3, dash='dash'),
+                                             name='Direct Fit'))
+                if bestfit_withAmp[1] > xrange[1]: xrange[1] = bestfit_withAmp[1] + 0.01
+
             title = 'Likelihood space' #r'$(S/N - 1/x + time_thresh/(numpy.exp (x*time_thresh)-1))^2$'
             minifig.update_layout(transition_duration=500,
                                 title={'text': title,
@@ -562,7 +630,7 @@ def generate_figure (dataframe, selected_column, nbins, yaxis_type, date_by_type
                                 font=dict(size=18))
             #minifig.update_yaxes(showticklabels=False)
 
-            fitTable = createFitTable (bestfit, anaRate, isArrival=selected_column=='Interarrival Time (minutes)')
+            fitTable = createFitTable (bestfit_withAmp, anaRate, isArrival=selected_column=='Interarrival Time (minutes)')
         
     else: ## time-series
 
@@ -596,7 +664,7 @@ def generate_figure (dataframe, selected_column, nbins, yaxis_type, date_by_type
                       font_color = 'lightgray',
                       font_family = 'sans-serif',
                       font=dict(size=18),
-                      showlegend=False)
+                      showlegend=True)
 
     return fig, fitTable, minifig
 
@@ -623,10 +691,43 @@ def createFitTable (fit, ana, isArrival=False):
                       responsive=True,
                       striped=True)
 
-def generate_table(dataframe, selected_column):
+def generate_table(dataframe, selected_column, meanRadServiceTimedf=None):
 
-    this_column = 'Decoded Radiologists' if selected_column == 'Mean Radiologist Service Time (minutes)' else selected_column
-    series = dataframe[this_column]
+    if selected_column == 'Mean Radiologist Service Time (minutes)':
+
+        fitSeries = meanRadServiceTimedf[meanRadServiceTimedf['series'] == 'Direct Fit']['data']
+        #anaSeries = meanRadServiceTimedf[meanRadServiceTimedf['series'] == 'analytical']['data']
+
+        fitStats = fitSeries.describe()
+        #anaStats = anaSeries.describe()
+
+        # 0. Header
+        row0 = html.Tr([html.Td("Method"), html.Td('Direct Fit')])
+        # 1. number of radiologists with valid
+        row1 = html.Tr([html.Td("Number of radiologists with valid solutions"), html.Td(len(fitSeries))])
+        # 2. mean value
+        row2 = html.Tr([html.Td("Average of mean service time [minutes]"),
+                        html.Td(round (fitStats.loc['mean'], 1))])
+        # 3. range 
+        fitRange = '({0:.2f}, {1:.2f})'.format (fitStats.loc['min'], fitStats.loc['max'])
+        #anaRange = '({0:.2f}, {1:.2f})'.format (anaStats.loc['min'], anaStats.loc['max'])
+        row3 = html.Tr([html.Td("(Min, Max) values [minutes]"), html.Td(fitRange)])
+        # 4. 25%, 50%, 75%
+        fitPercentiles = '{0:.2f}, {1:.2f}, {2:.2f}'.format (fitSeries.quantile(0.025), fitStats.loc['50%'], fitSeries.quantile(0.975))
+        #anaPercentiles = '{0:.2f}, {1:.2f}, {2:.2f}'.format (anaStats.loc['25%'], anaStats.loc['50%'], anaStats.loc['75%'])
+        row4 = html.Tr([html.Td("2.5%, 50%, 97.5% [minutes]"), html.Td(fitPercentiles)])
+
+        table_body = [html.Tbody([row0, row1, row2, row3, row4])]
+
+        return dbc.Table(table_body,
+                        class_name='column',
+                        bordered=True,
+                        color='dark',
+                        hover=True,
+                        responsive=True,
+                        striped=True)
+
+    series = dataframe[selected_column]
 
     # 1. number of entries
     nEntries = len (series)
@@ -635,7 +736,7 @@ def generate_table(dataframe, selected_column):
     nValidEntries = len (series[~series.isna()])
     row2 = html.Tr([html.Td("Number of valid entries"), html.Td(nValidEntries)])
 
-    if selected_column in categoryColumns and not selected_column == 'Mean Radiologist Service Time (minutes)':
+    if selected_column in categoryColumns:
 
         # 3. number of unique categories
         categoryCounts = series.value_counts()
@@ -661,8 +762,8 @@ def generate_table(dataframe, selected_column):
         arange = '({0:.2f}, {1:.2f})'.format (stats.loc['min'], stats.loc['max'])
         row4 = html.Tr([html.Td("(Min, Max) values"), html.Td(arange)])
         # 5. 25%, 50%, 75%
-        percentiles = '{0:.2f}, {1:.2f}, {2:.2f}'.format (stats.loc['25%'], stats.loc['50%'], stats.loc['75%'])
-        row5 = html.Tr([html.Td("25%, 50%, 75%"), html.Td(percentiles)])
+        percentiles = '{0:.2f}, {1:.2f}, {2:.2f}'.format (series.quantile(0.025), stats.loc['50%'], series.quantile(0.975))
+        row5 = html.Tr([html.Td("2.5%, 50%, 97.5%"), html.Td(percentiles)])
 
         table_body = [html.Tbody([row1, row2, row3, row4, row5])]
 
@@ -924,7 +1025,7 @@ app.layout = html.Div (children=[
     ),
 
     html.Div(
-        id='table-container',  className='tableDiv'
+        id='table-container',  className='tableDiv', style={'width': '90%', 'display': 'block'}
     ),
 
     html.Br(),
@@ -971,7 +1072,7 @@ app.layout = html.Div (children=[
 
         html.Div (children=[
             html.Div([
-                html.P('Truth subgroups:', id='group-by-truth-p',
+                html.P('Diagnosis subgroups:', id='group-by-truth-p',
                     style={'display':'none'}),
                 dcc.RadioItems(
                     ['All', 'Diseased', 'Non-Diseased'],
@@ -1204,11 +1305,11 @@ def update_histo(nbins, selected_column, selected_reader, selected_reader_type,
     if selected_column in ['Interopen Time (minutes)', 'Interarrival Time (minutes)']:
         time_thresh = numpy.inf if selected_column == 'Interarrival Time (minutes)' else \
                       interopen_thresh if interopen_thresh is not None else 120
-        if nbins is None: nbins = find_bestfit_bins (dataframe, selected_column, time_thresh)
+        if nbins is None: nbins = find_bestfit_bins (dataframe, selected_column, time_thresh, verbose=False, withAmp=True)
         dataframe = dataframe[dataframe[selected_column] < time_thresh]
         
     ## For other variables, default to 50 bins
-    if nbins is None: nbins = 50
+    if nbins is None: nbins = 25 if selected_column == 'Mean Radiologist Service Time (minutes)' else 50
 
     ## If selected group by truth, slice it
     if group_by_truth == 'Diseased':
@@ -1237,15 +1338,21 @@ def update_histo(nbins, selected_column, selected_reader, selected_reader_type,
     elif group_by_busniessHours == 'Outside hours':
         dataframe = dataframe[~dataframe['Within Business Hours']]
 
+    meanRadServiceTimedf = None
+    if selected_column == 'Mean Radiologist Service Time (minutes)':
+        if meanservice_thresh is None: meanservice_thresh = meanServiceTimeThresh
+        meanRadServiceTimedf = get_interopenTimes (selected_reader_type, group_by_truth, group_by_AIresult, group_by_afterAI,
+                                                   group_by_busniessHours, time_thresh=time_thresh, meanservice_thresh=meanservice_thresh)
+
     ## Update figure
     fig, fitTable, minifig = generate_figure (dataframe, selected_column, nbins, yaxis_type, date_by_type,
-                                              time_thresh=time_thresh, meanservice_thresh=meanservice_thresh)
+                                              time_thresh=time_thresh, meanRadServiceTimedf=meanRadServiceTimedf)
 
     ## Update display
     styles = define_style (dataframe, selected_column, fitTable)
 
     ## Update table
-    statsTable = generate_table(dataframe, selected_column)
+    statsTable = generate_table(dataframe, selected_column, meanRadServiceTimedf=meanRadServiceTimedf)
 
     return fig, minifig, selected_column, statsTable, fitTable, styles['nbins'], styles['nbins-text'], styles['nbins-option'], \
            styles['graphic-div'], styles['yaxis-type'], styles['yaxis-scale-p'], \
@@ -1262,8 +1369,7 @@ def update_histo(nbins, selected_column, selected_reader, selected_reader_type,
 @app.callback(
     Output("first_output","data"),
     Input('download-csv','n_clicks'), 
-    prevent_initial_call = True,
-)
+    prevent_initial_call = True)
 def dl_un_csv(n_clicks):
     results = get_results (df, readers, rad_nbins=20, rad_time_thresh=120)
     return dcc.send_data_frame(results.to_csv, filename=f'results.csv',sep=',',header=True,index=False,encoding='utf-8')
